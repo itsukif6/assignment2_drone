@@ -126,6 +126,7 @@ def main():
     #   batch_size    : 每次梯度更新用多少資料
     #   gamma         : 折扣因子, 0.99 代表重視長期回報
     #   ent_coef      : 熵獎勵係數, 鼓勵 agent 探索
+
     model = PPO(
         policy        = 'MlpPolicy',   # 全連接網路 (適合向量輸入) 
         env           = env,
@@ -138,13 +139,16 @@ def main():
         tensorboard_log = './logs/tensorboard/',
     )
 
+    # 載入現有模型繼續訓練
+    # model = PPO.load('ppo_drone', env=env)
+
     # --- 設定 Callback ---
     callback = RewardLoggerCallback(save_dir='logs')
 
     # --- 開始訓練 ---
     # total_timesteps: 總共執行幾步
-    # 建議: 先用 50_000 測試能不能跑通, 確認沒問題再改成 200_000
-    TOTAL_TIMESTEPS = 50_000
+    # 先用 50_000 測試能不能跑通, 確認沒問題再改成 200_000。再測試 300_000。
+    TOTAL_TIMESTEPS = 300_000
     print(f'\n開始訓練, 共 {TOTAL_TIMESTEPS:,} 步...\n')
 
     try:

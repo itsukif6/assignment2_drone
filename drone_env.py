@@ -102,9 +102,9 @@ class DroneROSInterface(Node):
         3. 發 /takeoff 讓無人機起飛
         """
         self.reset_pub.publish(Empty())
-        rclpy.spin_once(self, timeout_sec=0.5)   # 等重置生效
+        rclpy.spin_once(self, timeout_sec=2.0)   # 等重置生效
         self.takeoff_pub.publish(Empty())
-        rclpy.spin_once(self, timeout_sec=1.5)   # 等起飛穩定
+        rclpy.spin_once(self, timeout_sec=3.0)   # 等起飛穩定
 
 
 # ================================================================
@@ -132,13 +132,13 @@ class DroneGymEnv(gym.Env):
     MAX_SPEED      = 1.5    # 動作空間上下限, 單位 m/s
     ARRIVE_DIST    = 0.3    # 距離目標多近算「到達」, 單位 m
     MAX_STEPS      = 300    # 每個 episode 最多幾步 (1步 ≈ 0.1秒 → 30秒上限) 
-    BOUNDARY_XY    = 10.0   # x/y 方向的邊界, 超過就終止
-    BOUNDARY_Z_MAX = 6.0    # 最高飛多高
-    BOUNDARY_Z_MIN = 0.2    # 最低 (快碰地板就終止) 
+    BOUNDARY_XY    = 15.0   # x/y 方向的邊界, 超過就終止
+    BOUNDARY_Z_MAX = 8.0    # 最高飛多高
+    BOUNDARY_Z_MIN = -1.0   # 最低
 
     # 目標點隨機範圍
-    TARGET_LOW  = np.array([-5.0, -5.0, 1.0], dtype=np.float32)
-    TARGET_HIGH = np.array([ 5.0,  5.0, 4.0], dtype=np.float32)
+    TARGET_LOW  = np.array([-3.0, -3.0, 1.0], dtype=np.float32)
+    TARGET_HIGH = np.array([ 3.0,  3.0, 3.0], dtype=np.float32)
 
     def __init__(self, ros_interface: DroneROSInterface):
         super().__init__()
@@ -180,23 +180,30 @@ class DroneGymEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # 重置無人機
-        self.ros.reset_drone()
+        self.ros.reset_pub.publish(Empty())
+        
+        # 真正等無人機落地（z 穩定在 0.1 以下）
+        for _ in range(100):
+            rclpy.spin_once(self.ros, timeout_sec=0.1)
+        
+        self.ros.takeoff_pub.publish(Empty())
+        
+        # 真正等無人機飛起來（z 超過 0.8m）
+        for _ in range(100):
+            rclpy.spin_once(self.ros, timeout_sec=0.1)
+            if self.ros.current_pose[2] > 0.8:
+                break
+
         self.step_count = 0
+        self.target = np.array([2.0, 2.0, 2.0], dtype=np.float32)
 
-        # 隨機生成目標點
-        self.target = self.np_random.uniform(
-            low=self.TARGET_LOW, high=self.TARGET_HIGH
-        ).astype(np.float32)
-
-        # 等一下讓無人機穩定, 再讀初始距離
         rclpy.spin_once(self.ros, timeout_sec=0.3)
         self.prev_dist = float(np.linalg.norm(self.ros.current_pose - self.target))
 
-        self.get_logger().info(
-            f'新 episode 開始, 目標點: {self.target}, 初始距離: {self.prev_dist:.2f}m'
-        ) if hasattr(self, 'get_logger') else None
-
+        # 如果 prev_dist 是 nan，給一個預設值
+        if np.isnan(self.prev_dist):
+            self.prev_dist = 5.0
+            
         return self._get_obs(), {}
 
     # ----------------------------------------------------------
@@ -297,10 +304,9 @@ class DroneGymEnv(gym.Env):
             self.ros.current_vel,    # 3 維
         ]).astype(np.float32)
 
-        # clip 到 observation_space 範圍內, 避免 SB3 報警告
-        obs = np.clip(obs,
-                      self.observation_space.low,
-                      self.observation_space.high)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
+
+        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
         return obs
 
     def get_logger(self):

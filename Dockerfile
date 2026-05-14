@@ -129,4 +129,13 @@ RUN printf '%s\n' \
     > /start_vnc.sh && chmod +x /start_vnc.sh
 
 WORKDIR /ros2_ws
+
+# ---------- RL 套件 ----------
+# ---------- RL 套件 ----------
+RUN apt-get update && apt-get install -y python3-pip && \
+    pip3 install "numpy<2" && \
+    pip3 install "opencv-python-headless<4.8" && \
+    pip3 install tensorboard stable-baselines3 gymnasium matplotlib && \
+    rm -rf /var/lib/apt/lists/*
+
 CMD ["/start_vnc.sh"]
