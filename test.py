@@ -10,6 +10,11 @@ test.py
     python3 test.py --episodes 20      # 指定跑 20 個 episode
     python3 test.py --model my_model   # 指定模型檔名 (不含 .zip) 
     python3 test.py --baseline         # 改跑 P 控制器 (作為 baseline 比較) 
+
+參考論文:
+    Paper 1: A new approach for drone tracking with drone using Proximal Policy Optimization based distributed deep reinforcement learning
+    Paper 2: AirPilot Interpretable PPO-based DRL Auto Tuned Nonlinear PID Drone Controller for Robust Autonomous Flights
+    Paper 3: Application of Reinforcement Learning in Controlling Quadrotor UAV Flight Actions
 """
 
 import argparse
@@ -71,10 +76,10 @@ def run_baseline_episode(ros: DroneROSInterface, target: np.ndarray,
 # 主測試流程
 # ================================================================
 def main():
-    parser = argparse.ArgumentParser(description='測試 PPO 無人機導航模型')
-    parser.add_argument('--episodes', type=int,   default=10,        help='測試回合數')
-    parser.add_argument('--model',    type=str,   default='ppo_drone', help='模型檔名 (不含 .zip) ')
-    parser.add_argument('--baseline', action='store_true',            help='跑 P 控制器 baseline')
+    parser = argparse.ArgumentParser(description='Test PPO drone model')
+    parser.add_argument('--episodes', type=int,   default=10,        help='Test rounds')
+    parser.add_argument('--model',    type=str,   default='ppo_drone', help='Model name (without .zip) ')
+    parser.add_argument('--baseline', action='store_true',            help='Run P controller baseline')
     args = parser.parse_args()
 
     # --- 初始化 ---
@@ -83,20 +88,20 @@ def main():
     env = DroneGymEnv(ros)
 
     # 等待位置資料
-    print('等待 Gazebo 位置資料...')
+    print('Wait for Gazebo place data...')
     while not ros.pose_received:
         rclpy.spin_once(ros, timeout_sec=0.5)
 
     # --- 決定跑 RL 還是 baseline ---
     if args.baseline:
-        print(f'\n跑 P 控制器 Baseline, 共 {args.episodes} 個 episode')
+        print(f'\nRun P controller Baseline, total: {args.episodes} episodes')
         mode = 'baseline'
         model = None
     else:
-        print(f'\n載入模型: {args.model}.zip')
+        print(f'\nLoad model: {args.model}.zip')
         model = PPO.load(args.model)
         mode  = 'rl'
-        print(f'模型載入成功, 開始測試 {args.episodes} 個 episode\n')
+        print(f'Model load success, start training {args.episodes} episodes\n')
 
     # --- 跑測試 ---
     results = []
@@ -140,10 +145,10 @@ def main():
             'reward':  ep_reward,
         })
 
-        status = '成功' if success else '失敗'
+        status = 'Success' if success else 'Failure'
         print(f'Episode {ep:3d}/{args.episodes} | {status} | '
-              f'步數: {ep_steps:4d} | reward: {ep_reward:8.2f} | '
-              f'目標: ({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f})')
+              f'Step: {ep_steps:4d} | reward: {ep_reward:8.2f} | '
+              f'Target: ({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f})')
 
     # --- 統計結果 ---
     n_success = sum(r['success'] for r in results)
@@ -152,10 +157,10 @@ def main():
     mean_steps   = np.mean([r['steps']   for r in results])
 
     print('\n' + '=' * 55)
-    print(f'  測試模式: {"P 控制器 Baseline" if mode == "baseline" else "PPO RL Agent"}')
-    print(f'  成功率  : {n_success}/{args.episodes} = {success_rate:.1f}%')
-    print(f'  平均 reward: {mean_reward:.2f}')
-    print(f'  平均步數: {mean_steps:.1f}')
+    print(f'  Test mode: {"P controller Baseline" if mode == "baseline" else "PPO RL Agent"}')
+    print(f'  Success rate  : {n_success}/{args.episodes} = {success_rate:.1f}%')
+    print(f'  Mean reward: {mean_reward:.2f}')
+    print(f'  Mean steps: {mean_steps:.1f}')
     print('=' * 55)
 
     # --- 清理 ---

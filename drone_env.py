@@ -10,6 +10,11 @@ Task B: 隨機目標導航 (Random Target Navigation)
 
 使用方式: 
     此檔案不直接執行, 由 train.py 和 test.py 匯入使用.
+
+參考論文:
+    Paper 1: A new approach for drone tracking with drone using Proximal Policy Optimization based distributed deep reinforcement learning
+    Paper 2: AirPilot Interpretable PPO-based DRL Auto Tuned Nonlinear PID Drone Controller for Robust Autonomous Flights
+    Paper 3: Application of Reinforcement Learning in Controlling Quadrotor UAV Flight Actions
 """
 
 import math
