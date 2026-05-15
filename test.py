@@ -8,8 +8,8 @@ test.py
 使用方式: 
     python3 test.py                    # 預設跑 10 個 episode
     python3 test.py --episodes 20      # 指定跑 20 個 episode
-    python3 test.py --model my_model   # 指定模型檔名 ( 不含 .zip ) 
-    python3 test.py --baseline         # 改跑 P 控制器 ( 作為 baseline 比較 ) 
+    python3 test.py --model my_model   # 指定模型檔名  ( 不含 .zip ) 
+    python3 test.py --baseline         # 改跑 P 控制器  ( 作為 baseline 比較 ) 
 
 參考論文: 
     Paper 1: A new approach for drone tracking with drone using Proximal Policy Optimization based distributed deep reinforcement learning
@@ -27,7 +27,7 @@ from drone_env import DroneROSInterface, DroneGymEnv
 
 
 # ================================================================
-# P 控制器 Baseline ( 和 fly_straight.py 相同邏輯 ) 
+# P 控制器 Baseline  ( 和 fly_straight.py 相同邏輯 ) 
 # 用來和 RL agent 比較
 # ================================================================
 def run_baseline_episode(ros: DroneROSInterface, target: np.ndarray,
@@ -63,7 +63,7 @@ def run_baseline_episode(ros: DroneROSInterface, target: np.ndarray,
         ros.send_velocity(*vel)
         rclpy.spin_once(ros, timeout_sec=0.1)
 
-        # 簡易 reward ( 方便和 RL 比較 ) 
+        # 簡易 reward  ( 方便和 RL 比較 ) 
         curr_dist = float(np.linalg.norm(ros.current_pose - target))
         total_reward += 5.0 * (prev_dist - curr_dist) - 0.1
         prev_dist = curr_dist
@@ -88,7 +88,7 @@ def main():
     env = DroneGymEnv(ros)
 
     # 等待位置資料
-    print('Wait for Gazebo place data...')
+    print('Wait for Gazebo place data... ')
     while not ros.pose_received:
         rclpy.spin_once(ros, timeout_sec=0.5)
 
@@ -148,7 +148,7 @@ def main():
         status = 'Success' if success else 'Failure'
         print(f'Episode {ep:3d}/{args.episodes} | {status} | '
               f'Step: {ep_steps:4d} | reward: {ep_reward:8.2f} | '
-              f'Target: ({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f})')
+              f'Target:  ( {target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f} ) ')
 
     # --- 統計結果 ---
     n_success = sum(r['success'] for r in results)

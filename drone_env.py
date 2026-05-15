@@ -54,10 +54,13 @@ class DroneROSInterface(Node):
         self.takeoff_pub = self.create_publisher(
             Empty, '/simple_drone/takeoff', 10
         )
+        # 保留原有的註解不刪除
         # self.reset_pub = self.create_publisher(
         #     Empty, '/simple_drone/reset', 10
         # )
-        self.reset_client = self.create_client(EmptySrv, '/reset_simulation')
+        
+        # 根據 reset_sim.sh 的發現, 這裡改為呼叫 /reset_world 原生服務
+        self.reset_client = self.create_client(EmptySrv, '/reset_world')
 
         # --- Subscribers: 接收無人機狀態 ---
         # gt_pose: ground truth 位置 ( 最準確, 直接來自 Gazebo ) 
@@ -109,7 +112,8 @@ class DroneROSInterface(Node):
         3. 發 /takeoff 讓無人機起飛
         """
         # self.reset_pub.publish(Empty())
-        self.reset_client = self.create_client(EmptySrv, '/reset_simulation')
+        # 同步修改為 /reset_world
+        self.reset_client = self.create_client(EmptySrv, '/reset_world')
         rclpy.spin_once(self, timeout_sec=2.0)   # 等重置生效
         self.takeoff_pub.publish(Empty())
         rclpy.spin_once(self, timeout_sec=3.0)   # 等起飛穩定
@@ -130,9 +134,9 @@ class DroneGymEnv(gym.Env):
         - 到達 or 超時 or 飛出邊界 -> 結束
 
     MDP 定義: 
-        State  ( 9維 ): [pos_x, pos_y, pos_z, target_x, target_y, target_z, vel_x, vel_y, vel_z]
-        Action ( 3維 ): [vx, vy, vz], 範圍 [-MAX_SPEED, MAX_SPEED]
-        Reward: 見 _compute_reward( )
+        State  ( 9維 ) : [pos_x, pos_y, pos_z, target_x, target_y, target_z, vel_x, vel_y, vel_z]
+        Action ( 3維 ) : [vx, vy, vz], 範圍 [-MAX_SPEED, MAX_SPEED]
+        Reward: 見 _compute_reward( ) 
         Gamma : 在 train.py 中設定 ( 預設 0.99 ) 
     """
 
@@ -200,7 +204,7 @@ class DroneGymEnv(gym.Env):
                 future = self.ros.reset_client.call_async(req)
                 rclpy.spin_until_future_complete(self.ros, future, timeout_sec=2.0)
             else:
-                self.get_logger().error('Gazebo reset service not available!')
+                self.get_logger().error('Gazebo reset service not available! ')
             
             # 給物理引擎一點時間更新座標
             for _ in range(50):
@@ -214,15 +218,15 @@ class DroneGymEnv(gym.Env):
             
             if not reset_success:
                 retry_count += 1
-                self.get_logger().warn(f'Reset timeout, drone is stuck at {pos}. Retrying... ({retry_count}/{max_retries})')
+                self.get_logger().warn(f'Reset timeout, drone is stuck at {pos}. Retrying...  ( {retry_count}/{max_retries} ) ')
 
         if not reset_success:
-            raise RuntimeError("Fatal Error: Gazebo failed to reset the drone. Please restart the simulator.")
+            raise RuntimeError("Fatal Error: Gazebo failed to reset the drone. Please restart the simulator. ")
         
         # --- 發送起飛指令 ---
         self.ros.takeoff_pub.publish(Empty())
         
-        # 確保起飛達到安全高度 (Z 超過 0.8m)
+        # 確保起飛達到安全高度  ( Z 超過 0.8m ) 
         takeoff_success = False
         for _ in range(100):
             rclpy.spin_once(self.ros, timeout_sec=0.1)
@@ -230,8 +234,8 @@ class DroneGymEnv(gym.Env):
                 takeoff_success = True
                 break
                 
-        if not takeoff_success:
-            self.get_logger().warn('Warning: Drone might not have reached safe takeoff height.')
+        # if not takeoff_success:
+        #     self.get_logger().warn('Warning: Drone might not have reached safe takeoff height. ')
 
         # 初始化內部狀態
         self.step_count = 0
@@ -249,7 +253,7 @@ class DroneGymEnv(gym.Env):
     # step( ): 每步 Agent 決策後呼叫
     # ----------------------------------------------------------
     def step(self, action):
-        # 1. 把 action clip 到安全範圍 ( 保險用 ) 
+        # 1. 把 action clip 到安全範圍  ( 保險用 ) 
         action = np.clip(action, -self.MAX_SPEED, self.MAX_SPEED)
 
         # 2. 發指令給無人機, 等模擬器更新
@@ -270,7 +274,7 @@ class DroneGymEnv(gym.Env):
         return obs, reward, terminated, truncated, {}
 
     # ----------------------------------------------------------
-    # _compute_reward( ): 獎勵函數 ( 核心設計 ) 
+    # _compute_reward( ): 獎勵函數  ( 核心設計 ) 
     # ----------------------------------------------------------
     def _compute_reward(self, action: np.ndarray, pos: np.ndarray):
         terminated = False
@@ -280,22 +284,22 @@ class DroneGymEnv(gym.Env):
         r_progress = 5.0 * (self.prev_dist - curr_dist)
         self.prev_dist = curr_dist
 
-        # --- 策略 2: 胡蘿蔔引導 ( Dense Positive Reward ) ---
-        # 如果無人機進入目標的引力圈 ( 例如 2 公尺內 ) , 給予微小的常駐正回饋. 
+        # --- 策略 2: 胡蘿蔔引導  ( Dense Positive Reward )  ---
+        # 如果無人機進入目標的引力圈  ( 例如 2 公尺內 )  , 給予微小的常駐正回饋. 
         # 讓它覺得待在目標附近是一件值得的事, 誘使它不小心撞上目標拿大獎. 
         r_proximity = 0.2 if curr_dist < 2.0 else 0.0
 
-        # --- 到達獎勵 ( 最大蘿蔔 ) ---
+        # --- 到達獎勵  ( 最大蘿蔔 )  ---
         r_arrive = 0.0
         if curr_dist < self.ARRIVE_DIST:
             r_arrive = 100.0
             terminated = True
 
-        # --- 策略 1: 生存與死亡的數學題 ( 打碎自殺的誘因 ) ---
+        # --- 策略 1: 生存與死亡的數學題  ( 打碎自殺的誘因 )  ---
         r_time = -0.1
         # 一回合最多 300 步, 光陰耗盡最多被扣 30 分. 
         # 撞牆懲罰必須大於 -30, 設定為 -50 分. 
-        # 這樣 Agent 就會發現: 活到超時 ( 最慘 -30 ) 也比 直接撞天花板 ( -50 ) 好. 
+        # 這樣 Agent 就會發現: 活到超時  ( 最慘 -30 )  也比 直接撞天花板  ( -50 )  好. 
         
         r_boundary = 0.0
         out_of_bounds = (
@@ -308,11 +312,11 @@ class DroneGymEnv(gym.Env):
             r_boundary = -50.0  # 修改死亡懲罰, 超越時間懲罰的極限
             terminated = True
         
-        # 軟性高度預警 ( 超過 6 公尺就開始給予輕微壓力, 提早產生向下飛的梯度 ) 
+        # 軟性高度預警  ( 超過 6 公尺就開始給予輕微壓力, 提早產生向下飛的梯度 ) 
         elif pos[2] > 6.0:
             r_boundary = -0.5 * (pos[2] - 6.0)
 
-        # --- 策略 3: 動作意圖的直接懲罰 ( Action Penalty ) ---
+        # --- 策略 3: 動作意圖的直接懲罰  ( Action Penalty )  ---
         r_action = 0.0
         # 慣性煞車: 當高度大於 6.5 公尺, 且神經網路還輸出向上的速度指令時, 直接重罰動作
         if pos[2] > 6.5 and action[2] > 0:

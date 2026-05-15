@@ -2,7 +2,7 @@
 """
 train.py
 --------
-用 PPO 演算法訓練無人機隨機目標導航 ( Task B ) . 
+用 PPO 演算法訓練無人機隨機目標導航  ( Task B ) . 
 
 使用方式: 
     python3 train.py
@@ -38,7 +38,7 @@ from drone_env import DroneROSInterface, DroneGymEnv
 class RewardLoggerCallback(BaseCallback):
     """
     繼承 SB3 的 BaseCallback, 在訓練過程中收集每個 episode 的 reward. 
-    訓練結束後呼叫 save_curve( ) 存成 CSV 和圖片. 
+    訓練結束後呼叫 save_curve ( ) 存成 CSV 和圖片. 
     """
 
     def __init__(self, save_dir: str = 'logs', verbose=0):
@@ -53,7 +53,7 @@ class RewardLoggerCallback(BaseCallback):
         # 累計這一步的 reward
         self._current_ep_reward += self.locals['rewards'][0]
 
-        # 如果這個 episode 結束了 ( done = terminated or truncated ) 
+        # 如果這個 episode 結束了  ( done = terminated or truncated ) 
         dones = self.locals.get('dones', [False])
         if dones[0]:
             self.episode_rewards.append(self._current_ep_reward)
@@ -82,7 +82,7 @@ class RewardLoggerCallback(BaseCallback):
         episodes = list(range(1, len(self.episode_rewards) + 1))
         rewards  = self.episode_rewards
 
-        # 移動平均 ( 每 20 回合 ) 讓曲線更平滑好看
+        # 移動平均  ( 每 20 回合 )  讓曲線更平滑好看
         window = 20
         smoothed = []
         for i in range(len(rewards)):
@@ -91,7 +91,7 @@ class RewardLoggerCallback(BaseCallback):
 
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(episodes, rewards,   color='lightblue', alpha=0.5, label='Round reward')
-        ax.plot(episodes, smoothed,  color='steelblue', linewidth=2, label=f'Move mean: ({window} rounds)')
+        ax.plot(episodes, smoothed,  color='steelblue', linewidth=2, label=f'Move mean:  ( {window} rounds ) ')
         ax.set_xlabel('Episode', fontsize=12)
         ax.set_ylabel('Total Reward', fontsize=12)
         ax.set_title('PPO Training Curve - Task B Random Target Navigation', fontsize=13)
@@ -118,14 +118,14 @@ def main():
     ros_interface = DroneROSInterface()
     env = DroneGymEnv(ros_interface)
 
-    # --- 等待第一筆位置資料 ( 確保模擬器已啟動 ) ---
-    print('Waiting for Gazebo place data...')
+    # --- 等待第一筆位置資料  ( 確保模擬器已啟動 )  ---
+    print('Waiting for Gazebo place data... ')
     while not ros_interface.pose_received:
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
     print('Data received, start training. ')
 
     # 網路架構設定
-    # 根據 Paper 2 ( Section IV.A ) , actor 和 critic 網路皆使用 2 個隱藏層, 每層 64 個神經元, 取代原本的 128. 
+    # 根據 Paper 2  ( Section IV.A )  , actor 和 critic 網路皆使用 2 個隱藏層, 每層 64 個神經元. 
     policy_kwargs = dict(
         net_arch=dict(pi=[64, 64], vf=[64, 64])
     )
@@ -134,21 +134,21 @@ def main():
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=0.0003, # Paper 2 與 Paper 3 皆建議使用 0.0003 作為最佳學習率. 
-        n_steps=2048,         # Paper 3 指定 2048 步來穩定梯度更新. 
-        batch_size=64,        # Paper 2 與 Paper 3 皆建議 batch_size 為 64. 
-        gamma=0.99,           # Paper 2 與 Paper 3 一致使用 0.99 作為折扣因子. 
-        gae_lambda=0.95,      # Paper 3 使用 0.95 作為 GAE 參數. 
-        clip_range=0.2,       # Paper 2 說明使用 0.2 作為截斷範圍能確保穩定漸進的策略更新. 
-        ent_coef=0.0,         # 依照 Paper 3 設計, 將熵係數設為 0.0 以加速收斂. 
-        vf_coef=0.5,          # 依照 Paper 3 設計, 將價值函數係數設為 0.5. 
-        target_kl=0.01,       # 依照 Paper 3 設計, 使用 0.01 作為 target KL 以提早停止更新. 
+        learning_rate=0.0003, # 根據 Paper 2 與 Paper 3, 最佳學習率設為 0.0003. 
+        n_steps=2048,         # 根據 Paper 3 的設計, 指定 2048 步來穩定梯度更新. 
+        batch_size=64,        # 根據 Paper 2 與 Paper 3, 建議 batch_size 為 64. 
+        gamma=0.99,           # 根據 Paper 2 與 Paper 3, 使用 0.99 作為折扣因子. 
+        gae_lambda=0.95,      # 根據 Paper 3, 使用 0.95 作為 GAE 參數. 
+        clip_range=0.2,       # 根據 Paper 2, 使用 0.2 作為截斷範圍能確保策略穩定更新. 
+        ent_coef=0.0,         # 根據 Paper 3 的建議, 熵係數設為 0.0 加速收斂. 
+        vf_coef=0.5,          # 根據 Paper 3 的建議, 價值函數係數設為 0.5. 
+        target_kl=0.01,       # 根據 Paper 3, 使用 0.01 作為 target KL 提早停止過度更新. 
         policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log="./ppo_drone_logs/"
     )
 
-    print("Starting training with optimized parameters...")
+    print("Starting training with optimized parameters... ")
 
     # 載入現有模型繼續訓練
     # model = PPO.load('ppo_drone', env=env)
@@ -158,9 +158,9 @@ def main():
 
     # --- 開始訓練 ---
     # total_timesteps: 總共執行幾步
-    # 根據 Paper 3 ( Table 1 ) , 設定總訓練步數為 150,000 步. 
+    # 根據 Paper 3  ( Table 1 )  , 設定總訓練步數為 150000 步. 
     TOTAL_TIMESTEPS = 150_000
-    print(f'\nStart training, total: {TOTAL_TIMESTEPS:,} steps...\n')
+    print(f'\nStart training, total: {TOTAL_TIMESTEPS} steps...\n')
 
     try:
         model.learn(
@@ -169,7 +169,7 @@ def main():
             progress_bar    = False,
         )
     except KeyboardInterrupt:
-        print('\nTrain interrupted, save current model...')
+        print('\nTrain interrupted, save current model... ')
 
     # --- 儲存模型 ---
     model.save('ppo_drone')
