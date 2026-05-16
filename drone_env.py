@@ -140,10 +140,10 @@ class DroneROSInterface(Node):
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
 
         if future.result() is not None:
-            self.get_logger().info('/reset_world called successfully')
+            # self.get_logger().info('/reset_world called successfully')
             return True
         else:
-            self.get_logger().warn('/reset_world call timed out')
+            # self.get_logger().warn('/reset_world call timed out')
             return False
 
     def takeoff(self):
@@ -199,8 +199,6 @@ class DroneGymEnv(gym.Env):
 
     # 目標點隨機範圍: 依據 Paper 3 Section 4.2 的場景設計,
     # 目標在 x/y [-5,5], z [1,3] 的安全空間內隨機生成.
-    TARGET_LOW  = np.array([-5.0, -5.0, 1.0], dtype=np.float32)
-    TARGET_HIGH = np.array([ 5.0,  5.0, 3.0], dtype=np.float32)
 
     # 等待起飛的最小安全高度: 確認無人機已真正離地才開始 Episode.
     MIN_HOVER_Z = 0.8
@@ -274,9 +272,9 @@ class DroneGymEnv(gym.Env):
             if self.ros.current_pose[2] > self.MIN_HOVER_Z:
                 break
 
-        self.ros.get_logger().info(
-            f'Episode started, drone at z={self.ros.current_pose[2]:.2f}m'
-        )
+        # self.ros.get_logger().info(
+        #     f'Episode started, drone at z={self.ros.current_pose[2]:.2f}m'
+        # )
 
         # --- Step 5: 隨機生成目標點 ---
         self.target = self.np_random.uniform(
@@ -336,14 +334,15 @@ class DroneGymEnv(gym.Env):
             curr_dist = 10.0
 
         # --- 1. 距離縮短獎勵 ---
-        # r_progress = 10.0 * (self.prev_dist - curr_dist)
-        # self.prev_dist = curr_dist
+        r_progress = 10.0 * (self.prev_dist - curr_dist)
+        self.prev_dist = curr_dist
         # 修改: 直接用負距離.
         # 每步的 reward 就是當前距離的負值, 距離越近 reward 越高.
         # 這個訊號是單調且穩定的, 不會因為距離變化量小而被抵消.
         # 初始距離約 3~5m, 所以 reward 範圍約 -5 到 0.
-        r_dist = -curr_dist
-        self.prev_dist = curr_dist
+        # r_dist = -curr_dist
+        # self.prev_dist = curr_dist
+        # 已驗證沒用
 
         # --- 2. 到達獎勵 ---
         r_arrive = 0.0
@@ -370,7 +369,12 @@ class DroneGymEnv(gym.Env):
             r_boundary = -50.0
             terminated = True
 
-        reward = r_dist + r_arrive + r_time + r_boundary
+        # 新增:
+        # --- 5. 蘿蔔引導 (常駐正回饋) ---
+        # 只要待在目標半徑 2 公尺內，每步都給微小加分，抵銷時間懲罰
+        r_proximity = 0.1 if curr_dist < 2.0 else 0.0
+
+        reward = r_progress + r_arrive + r_time + r_boundary + r_proximity
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:
