@@ -130,10 +130,15 @@ def main():
     #   Paper 2 (AirPilot) Section IV: "PPO is imported from stable_baselines3
     #   with a default 3e-4 learning rate."
     #   Paper 3 Table 1 亦使用相同值.
+    # learning_rate 調高: 加速初期學習.
+    #   目前 -100 的平坦曲線顯示梯度訊號太弱, 提高學習率能讓有效的更新更明顯.
     #
     # n_steps = 2048:
     #   Paper 3 (Shen & Huang, 2024) Table 1: PPO n_steps = 2048.
     #   較大的 n_steps 讓每次策略更新前收集更多軌跡, 提升梯度估計的穩定性.
+    # n_steps 改小: 讓每個 episode 結束後更快更新策略.
+    #   200 步 = 1 個 episode, 512 步約 2-3 個 episode 就更新一次,
+    #   讓 agent 更快從每次飛行中學習.
     #
     # batch_size = 64:
     #   Paper 2 Section IV & Paper 3 Table 1: batch_size = 64.
@@ -151,6 +156,8 @@ def main():
     # ent_coef = 0.01:
     #   熵係數鼓勵探索, 防止策略過早收斂到局部最優.
     #   Paper 1 (Tan & Karakose, 2023) 的分散式實驗顯示適度探索能加速收斂.
+    # ent_coef 調高: 增加探索.
+    #   agent 目前停在局部最優 (原地漂移), 更高的熵係數迫使它嘗試更多樣的動作.
     #
     # vf_coef = 0.5:
     #   Paper 3 Table 1: VF Coefficient = 0.5.
@@ -169,12 +176,12 @@ def main():
         policy        = 'MlpPolicy',
         env           = env,
         verbose       = 0,
-        learning_rate = 3e-4,
-        n_steps       = 2048,
+        learning_rate = 1e-3,
+        n_steps       = 512,
         batch_size    = 64,
         gamma         = 0.99,
         gae_lambda    = 0.95,
-        ent_coef      = 0.01,
+        ent_coef      = 0.05,
         vf_coef       = 0.5,
         policy_kwargs = dict(
             net_arch       = [256, 256],

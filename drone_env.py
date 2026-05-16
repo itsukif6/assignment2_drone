@@ -336,7 +336,13 @@ class DroneGymEnv(gym.Env):
             curr_dist = 10.0
 
         # --- 1. 距離縮短獎勵 ---
-        r_progress = 10.0 * (self.prev_dist - curr_dist)
+        # r_progress = 10.0 * (self.prev_dist - curr_dist)
+        # self.prev_dist = curr_dist
+        # 修改: 直接用負距離.
+        # 每步的 reward 就是當前距離的負值, 距離越近 reward 越高.
+        # 這個訊號是單調且穩定的, 不會因為距離變化量小而被抵消.
+        # 初始距離約 3~5m, 所以 reward 範圍約 -5 到 0.
+        r_dist = -curr_dist
         self.prev_dist = curr_dist
 
         # --- 2. 到達獎勵 ---
@@ -346,7 +352,11 @@ class DroneGymEnv(gym.Env):
             terminated = True
 
         # --- 3. 時間懲罰 ---
-        r_time = -0.5
+        # 時間懲罰從 -0.5 降到 -0.05:
+        # 目前 200步 × (-0.05) = -10 剛好等於整個 episode 的 reward,
+        # 導致 r_progress 的訊號完全被時間懲罰蓋過, agent 分不清楚飛近目標有沒有用.
+        # 降低時間懲罰讓距離縮短獎勵成為主要學習訊號.
+        r_time = -0.05
 
         # --- 4. 邊界懲罰 ---
         r_boundary = 0.0
@@ -360,7 +370,7 @@ class DroneGymEnv(gym.Env):
             r_boundary = -50.0
             terminated = True
 
-        reward = r_progress + r_arrive + r_time + r_boundary
+        reward = r_dist + r_arrive + r_time + r_boundary
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:
