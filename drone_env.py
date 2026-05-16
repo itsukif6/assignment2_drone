@@ -239,7 +239,12 @@ class DroneGymEnv(gym.Env):
 
         # 初始化內部狀態
         self.step_count = 0
-        self.target = np.array([2.0, 2.0, 2.0], dtype=np.float32)
+        # self.target = np.array([2.0, 2.0, 2.0], dtype=np.float32)
+        # 依据: Paper 3 Section 3.2.1 — 每回合随机初始化目标位置以训练泛化策略
+        # 依据: Paper 2 Section IV.A — 每次到达目标后重新随机生成下一个目标点
+        self.target = self.np_random.uniform(
+            self.TARGET_LOW, self.TARGET_HIGH
+        ).astype(np.float32)
 
         rclpy.spin_once(self.ros, timeout_sec=0.3)
         self.prev_dist = float(np.linalg.norm(self.ros.current_pose - self.target))

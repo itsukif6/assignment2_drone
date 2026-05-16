@@ -126,23 +126,31 @@ def main():
 
     # 網路架構設定
     # 根據 Paper 2  ( Section IV.A )  , actor 和 critic 網路皆使用 2 個隱藏層, 每層 64 個神經元. 
+    # policy_kwargs = dict(
+    #     net_arch=dict(pi=[64, 64], vf=[64, 64])
+    # )
+    # 根据 Paper 2 ( Section IV.A ) , actor 和 critic 网络皆使用 2 个隐藏层, 每层 64 个神经元, 取代原本的 128.
+    # 根据 Paper 1 ( Section 2.2.4, Table 2 ) , 激活函数明确指定为 tanh.
+    import torch
     policy_kwargs = dict(
-        net_arch=dict(pi=[64, 64], vf=[64, 64])
+        net_arch=dict(pi=[64, 64], vf=[64, 64]),
+        activation_fn=torch.nn.Tanh
     )
 
     # 根據三篇論文的最佳超參數來初始化 PPO 模型
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=0.0003, # 根據 Paper 2 與 Paper 3, 最佳學習率設為 0.0003. 
-        n_steps=2048,         # 根據 Paper 3 的設計, 指定 2048 步來穩定梯度更新. 
-        batch_size=64,        # 根據 Paper 2 與 Paper 3, 建議 batch_size 為 64. 
-        gamma=0.99,           # 根據 Paper 2 與 Paper 3, 使用 0.99 作為折扣因子. 
-        gae_lambda=0.95,      # 根據 Paper 3, 使用 0.95 作為 GAE 參數. 
-        clip_range=0.2,       # 根據 Paper 2, 使用 0.2 作為截斷範圍能確保策略穩定更新. 
-        ent_coef=0.0,         # 根據 Paper 3 的建議, 熵係數設為 0.0 加速收斂. 
-        vf_coef=0.5,          # 根據 Paper 3 的建議, 價值函數係數設為 0.5. 
-        target_kl=0.01,       # 根據 Paper 3, 使用 0.01 作為 target KL 提早停止過度更新. 
+        learning_rate=0.0003, # Paper 2 与 Paper 3 皆建议使用 0.0003 作为最佳学习率.
+        n_steps=2048,         # Paper 3 指定 2048 步来稳定梯度更新.
+        batch_size=64,        # Paper 2 与 Paper 3 皆建议 batch_size 为 64.
+        n_epochs=10,          # Paper 1 ( Table 3 ) 建议 Num_sgd_iter 使用较高值以充分利用每批数据, 取折中值 10.
+        gamma=0.99,           # Paper 2 与 Paper 3 一致使用 0.99 作为折扣因子.
+        gae_lambda=0.95,      # Paper 3 使用 0.95 作为 GAE 参数.
+        clip_range=0.2,       # Paper 2 说明使用 0.2 作为截断范围能确保稳定渐进的策略更新.
+        ent_coef=0.0,         # 依照 Paper 3 设计, 将熵系数设为 0.0 以加速收敛.
+        vf_coef=0.5,          # 依照 Paper 3 设计, 将价值函数系数设为 0.5.
+        target_kl=0.01,       # 依照 Paper 3 设计, 使用 0.01 作为 target KL 以提早停止更新.
         policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log="./ppo_drone_logs/"
@@ -158,8 +166,9 @@ def main():
 
     # --- 開始訓練 ---
     # total_timesteps: 總共執行幾步
-    # 根據 Paper 3  ( Table 1 )  , 設定總訓練步數為 150000 步. 
-    TOTAL_TIMESTEPS = 150_000
+    # 根据 Paper 1 ( Table 3 ) , 复杂三维导航任务建议使用 300,000 步以确保充分收敛.
+    # 根据 Paper 3 ( Table 1 ) , 简单固定场景可用 150,000 步, Task B 随机目标泛化需求更高故提升.
+    TOTAL_TIMESTEPS = 300_000
     print(f'\nStart training, total: {TOTAL_TIMESTEPS} steps...\n')
 
     try:
