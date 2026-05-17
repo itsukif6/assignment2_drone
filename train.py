@@ -204,43 +204,74 @@ def main():
     #   Paper 1 Table 3: "Stop condition: Time-steps = 300000."
     #   Paper 3 Table 1 亦使用 150000-300000 步, 300000 是合理的起始值.
 
-    model = PPO(
-        policy        = 'MlpPolicy',
-        env           = env,
-        verbose       = 0,
-        learning_rate = 1e-3,
-        n_steps       = 512,
-        batch_size    = 64,
-        gamma         = 0.99,
-        gae_lambda    = 0.95,
-        ent_coef      = 0.05,
-        vf_coef       = 0.5,
-        policy_kwargs = dict(
-            net_arch       = [256, 256],
-            activation_fn  = torch.nn.Tanh,
-        ),
-        tensorboard_log = './logs/tensorboard/',
-    )
+    MODEL_PATH = "ppo_drone"
 
-    # --- 設定 Callback ---
-    callback = RewardLoggerCallback(save_dir='logs')
+    # 檢查是否有之前訓練好的模型檔 (.zip)
+    if os.path.exists(MODEL_PATH + ".zip"):
+        print(f"Model found: {MODEL_PATH}.zip, continue training...")
+        # 載入舊模型，並綁定當前的環境
+        model = PPO.load(MODEL_PATH, env=env)
 
-    # --- 開始訓練 ---
-    TOTAL_TIMESTEPS = 300_000
-    print(f'\nStarting training for {TOTAL_TIMESTEPS:,} timesteps...\n')
+        # --- 設定 Callback ---
+        callback = RewardLoggerCallback(save_dir='logs')
 
-    try:
-        model.learn(
-            total_timesteps = TOTAL_TIMESTEPS,
-            callback        = callback,
-            progress_bar    = False,
+        # --- 開始訓練 ---
+        ADDITIONAL_TIMESTEPS = 300000
+        print(f'\nStarting additional training for {ADDITIONAL_TIMESTEPS:,} timesteps...\n')
+
+        try:
+            model.learn(
+                total_timesteps = ADDITIONAL_TIMESTEPS,
+                callback        = callback,
+                progress_bar    = False,
+                reset_num_timesteps = False,
+            )
+        except KeyboardInterrupt:
+            print('\nTraining interrupted. Saving current progress...')
+
+        # --- 儲存模型 ---
+        NEW_MODEL_NAME = "ppo_drone_add_30w_ep"
+        model.save(NEW_MODEL_NAME)
+        print('\nModel saved to ppo_drone_add_30w_ep.zip')
+    else:
+        print("Using new model...")
+        model = PPO(
+            policy        = 'MlpPolicy',
+            env           = env,
+            verbose       = 0,
+            learning_rate = 3e-4,
+            n_steps       = 1024,
+            batch_size    = 64,
+            gamma         = 0.99,
+            gae_lambda    = 0.95,
+            ent_coef      = 0.05,
+            vf_coef       = 0.5,
+            policy_kwargs = dict(
+                net_arch       = [256, 256],
+                activation_fn  = torch.nn.Tanh,
+            ),
+            tensorboard_log = './logs/tensorboard/',
         )
-    except KeyboardInterrupt:
-        print('\nTraining interrupted. Saving current progress...')
 
-    # --- 儲存模型 ---
-    model.save('ppo_drone')
-    print('\nModel saved to ppo_drone.zip')
+        # --- 設定 Callback ---
+        callback = RewardLoggerCallback(save_dir='logs')
+
+        # --- 開始訓練 ---
+        TOTAL_TIMESTEPS = 600_000
+        print(f'\nStarting training for {TOTAL_TIMESTEPS:,} timesteps...\n')
+
+        try:
+            model.learn(
+                total_timesteps = TOTAL_TIMESTEPS,
+                callback        = callback,
+                progress_bar    = False,
+            )
+        except KeyboardInterrupt:
+            print('\nTraining interrupted. Saving current progress...')
+
+        # --- 儲存模型 ---
+        model.save('ppo_drone')
+        print('\nModel saved to ppo_drone.zip')
 
     # --- 儲存訓練曲線 ---
     callback.save_curve()

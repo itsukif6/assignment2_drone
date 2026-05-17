@@ -174,10 +174,12 @@ class DroneGymEnv(gym.Env):
     """
 
     # 最大速度: 1.5 m/s, 與 Paper 2 NormalizedV 範圍 [-1, 1] 相符. 
-    MAX_SPEED = 1.5
+    # 測試 0.8:
+    MAX_SPEED = 0.8
 
     # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
     # "when the distance value is less than 40 cm, grant a reward of +100. "
+    # 測試 0.25:
     ARRIVE_DIST = 0.4
 
     # 每個 Episode 最多步數 200 步(20 秒): 
@@ -187,8 +189,9 @@ class DroneGymEnv(gym.Env):
 
     # 邊界: x/y 最大 15m, z 最大 8m. 
     # 放寬至 15m 以避免訓練初期因探索而頻繁出界. 
-    BOUNDARY_XY    = 15.0
-    BOUNDARY_Z_MAX = 8.0
+    # 測試: 3, 5m
+    BOUNDARY_XY    = 3.0
+    BOUNDARY_Z_MAX = 5.0
 
     # 地板邊界設為 -1.0(實際不會觸發): 
     # /reset_world 後無人機在地面, 需等待起飛才開始計算 reward, 
@@ -355,7 +358,9 @@ class DroneGymEnv(gym.Env):
             curr_dist = 10.0
 
         # --- 1. 距離縮短獎勵 ---
-        r_progress = 10.0 * (self.prev_dist - curr_dist)
+        # r_progress = 10.0 * (self.prev_dist - curr_dist)
+        # 修改: 負距離, 距離越近 reward 越高, 訊號穩定不被抵消
+        r_progress = 0.1*-curr_dist
         self.prev_dist = curr_dist
 
         # --- 2. 到達獎勵 ---
@@ -380,7 +385,9 @@ class DroneGymEnv(gym.Env):
             pos[2] < self.BOUNDARY_Z_MIN
         )
         if out_of_bounds:
-            r_boundary = -50.0
+            # 活著 200 步大約會被扣 40(距離) + 10(時間) = 50 分。
+            # 邊界懲罰必須設為 -200，讓模型知道撞牆自殺的下場比活著找目標慘非常多。
+            r_boundary = -200.0
             terminated = True
 
         # 新增: 
