@@ -36,37 +36,70 @@ from drone_env import DroneROSInterface, DroneGymEnv
 # ================================================================
 # 自訂 Callback: 每個 episode 結束時記錄 reward
 # ================================================================
+# ================================================================
+# 自訂 Callback: 每個 episode 結束時記錄 reward 與細項
+# ================================================================
 class RewardLoggerCallback(BaseCallback):
     """
-    繼承 SB3 的 BaseCallback, 在訓練過程中收集每個 episode 的 reward.
-    訓練結束後呼叫 save_curve() 存成 CSV 和圖片.
+    繼承 SB3 的 BaseCallback, 在訓練過程中收集每個 episode 的 reward 與細項. 
+    訓練結束後呼叫 save_curve ( ) 存成 CSV 和圖片. 
     """
 
     def __init__(self, save_dir: str = 'logs', verbose=0):
         super().__init__(verbose)
         os.makedirs(save_dir, exist_ok=True)
         self.save_dir = save_dir
-        self.episode_rewards    = []
-        self._current_ep_reward = 0.0
+        self.episode_rewards = []       # 每個 episode 的累計總 reward
+        self._current_ep_reward = 0.0   # 當前 episode 的累計總 reward
+        
+        # 新增: 記錄過去 10 回合的細項, 用來算平均
+        self.recent_components = []
 
     def _on_step(self) -> bool:
-        """每步都會被呼叫."""
+        """每步都會被呼叫. """
+        # 累計這一步的總 reward
         self._current_ep_reward += self.locals['rewards'][0]
 
+        # 檢查是否有傳出 infos ( 包含回合結束時的細項 ) 
+        for info in self.locals.get('infos', []):
+            if 'ep_components' in info:
+                self.recent_components.append(info['ep_components'])
+
+        # 如果這個 episode 結束了  ( done = terminated or truncated ) 
         dones = self.locals.get('dones', [False])
         if dones[0]:
             self.episode_rewards.append(self._current_ep_reward)
             self._current_ep_reward = 0.0
 
+            # 每 10 個 episode 印一次進度與細項平均
             ep = len(self.episode_rewards)
             if ep % 10 == 0:
                 recent_mean = np.mean(self.episode_rewards[-10:])
-                print(f'  Episode {ep:4d} | last 10 mean reward: {recent_mean:.2f}')
+                
+                # 計算過去 10 回合各細項的平均值
+                avg_comp = {k: 0.0 for k in self.recent_components[0].keys()}
+                for comp in self.recent_components[-10:]:
+                    for k, v in comp.items():
+                        avg_comp[k] += v
+                for k in avg_comp.keys():
+                    avg_comp[k] /= 10.0
 
-        return True
+                print(f'Episode {ep:4d} | Total Mean: {recent_mean:7.2f} | '
+                      f'Prog: {avg_comp["progress"]:6.2f} | '
+                      f'Prox: {avg_comp["proximity"]:5.2f} | '
+                      f'Arrive: {avg_comp["arrive"]:5.2f} | '
+                      f'Time: {avg_comp["time"]:6.2f} | '
+                      f'Bound: {avg_comp["boundary"]:6.2f} | ')
+                    #   f'Act: {avg_comp["action"]:5.2f} | '
+                    #   f'Smooth: {avg_comp["smooth"]:5.2f}')
+                
+                # 保持清單不要太長, 只留最近 10 筆
+                self.recent_components = self.recent_components[-10:]
+
+        return True   # 回傳 True 代表繼續訓練
 
     def save_curve(self):
-        """訓練結束後呼叫, 存 CSV 和訓練曲線圖."""
+        """訓練結束後呼叫, 存 CSV 和訓練曲線圖. """
         # --- 存 CSV ---
         csv_path = os.path.join(self.save_dir, 'rewards.csv')
         with open(csv_path, 'w', newline='') as f:
@@ -74,23 +107,22 @@ class RewardLoggerCallback(BaseCallback):
             writer.writerow(['episode', 'reward'])
             for i, r in enumerate(self.episode_rewards):
                 writer.writerow([i + 1, r])
-        print(f'CSV saved to {csv_path}')
+        print(f'Raw data saved: {csv_path}')
 
         # --- 畫訓練曲線 ---
         episodes = list(range(1, len(self.episode_rewards) + 1))
         rewards  = self.episode_rewards
 
         # 移動平均 (每 20 回合) 讓曲線更平滑好看
-        window   = 20
+        window = 20
         smoothed = []
         for i in range(len(rewards)):
             start = max(0, i - window + 1)
             smoothed.append(np.mean(rewards[start:i+1]))
 
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(episodes, rewards,  color='lightblue', alpha=0.5, label='per episode reward')
-        ax.plot(episodes, smoothed, color='steelblue',  linewidth=2,
-                label=f'moving avg ({window} episodes)')
+        ax.plot(episodes, rewards,   color='lightblue', alpha=0.5, label='Round reward')
+        ax.plot(episodes, smoothed,  color='steelblue', linewidth=2, label=f'Move mean:  ( {window} rounds ) ')
         ax.set_xlabel('Episode', fontsize=12)
         ax.set_ylabel('Total Reward', fontsize=12)
         ax.set_title('PPO Training Curve - Task B Random Target Navigation', fontsize=13)
@@ -101,7 +133,7 @@ class RewardLoggerCallback(BaseCallback):
         plt.tight_layout()
         plt.savefig(img_path, dpi=150)
         plt.close()
-        print(f'Training curve saved to {img_path}')
+        print(f'Training curve saved: {img_path}')
 
 
 # ================================================================

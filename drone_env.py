@@ -199,6 +199,11 @@ class DroneGymEnv(gym.Env):
 
     # 目標點隨機範圍: 依據 Paper 3 Section 4.2 的場景設計,
     # 目標在 x/y [-5,5], z [1,3] 的安全空間內隨機生成.
+    # TARGET_LOW  = np.array([-5.0, -5.0, 1.0], dtype=np.float32)
+    # TARGET_HIGH = np.array([ 5.0,  5.0, 3.0], dtype=np.float32)
+    # 修改: 把原本的 +-5.0 改小，原本的太大很難在 300000 內收斂
+    TARGET_LOW  = np.array([-1.0, -1.0, 1.0], dtype=np.float32)
+    TARGET_HIGH = np.array([ 1.0,  1.0, 3.0], dtype=np.float32)      
 
     # 等待起飛的最小安全高度: 確認無人機已真正離地才開始 Episode.
     MIN_HOVER_Z = 0.8
@@ -236,6 +241,12 @@ class DroneGymEnv(gym.Env):
         self.target     = np.zeros(3, dtype=np.float32)
         self.step_count = 0
         self.prev_dist  = None
+
+        # 新增: 用來記錄每回合各項獎勵的累計值
+        self.ep_components = {
+            'progress': 0.0, 'proximity': 0.0, 'arrive': 0.0, 
+            'time': 0.0, 'boundary': 0.0, 'action': 0.0, 'smooth': 0.0
+        }
 
     def reset(self, seed=None, options=None):
         """
@@ -288,22 +299,38 @@ class DroneGymEnv(gym.Env):
         if np.isnan(self.prev_dist):
             self.prev_dist = 5.0
 
+        # 新增: 回合重置時, 清空各項獎勵的累計值
+        for key in self.ep_components.keys():
+            self.ep_components[key] = 0.0
+
         return self._get_obs(), {}
 
     def step(self, action):
         """每步執行動作並回傳新狀態."""
+        # 1. 把 action clip 到安全範圍
         action = np.clip(action, -self.MAX_SPEED, self.MAX_SPEED)
 
+        # 2. 發指令給無人機, 等模擬器更新
         self.ros.send_velocity(*action)
         rclpy.spin_once(self.ros, timeout_sec=0.1)
         self.step_count += 1
 
-        obs               = self._get_obs()
-        pos               = self.ros.current_pose.copy()
-        reward, terminated = self._compute_reward(action, pos)
-        truncated         = self.step_count >= self.MAX_STEPS
+        # 3. 讀取新狀態
+        obs = self._get_obs()
+        pos = self.ros.current_pose.copy()
 
-        return obs, reward, terminated, truncated, {}
+        # 4. 計算 reward 並更新細項
+        reward, terminated = self._compute_reward(action, pos)
+
+        # 5. 超時終止
+        truncated = (self.step_count >= self.MAX_STEPS)
+
+        # 新增: 如果回合結束, 把這回合的細項打包進 info 傳出去
+        info = {}
+        if terminated or truncated:
+            info['ep_components'] = self.ep_components.copy()
+
+        return obs, reward, terminated, truncated, info
 
     def _compute_reward(self, action: np.ndarray, pos: np.ndarray):
         """
@@ -373,6 +400,25 @@ class DroneGymEnv(gym.Env):
         # --- 5. 蘿蔔引導 (常駐正回饋) ---
         # 只要待在目標半徑 2 公尺內，每步都給微小加分，抵銷時間懲罰
         r_proximity = 0.1 if curr_dist < 2.0 else 0.0
+
+        # # 新增:
+        # # --- 動作意圖的直接懲罰  ( Action Penalty )  ---
+        # r_action = 0.0
+        # if pos[2] > 6.5 and action[2] > 0:
+        #     r_action = -5.0 * action[2] 
+
+        # # 新增:
+        # # --- 動作平滑懲罰 ---
+        # r_smooth = -0.05 * float(np.linalg.norm(action))
+
+        # 新增: 將各項獎勵累加到內部記錄器中
+        self.ep_components['progress']  += r_progress
+        self.ep_components['proximity'] += r_proximity
+        self.ep_components['arrive']    += r_arrive
+        self.ep_components['time']      += r_time
+        self.ep_components['boundary']  += r_boundary
+        # self.ep_components['action']    += r_action
+        # self.ep_components['smooth']    += r_smooth
 
         reward = r_progress + r_arrive + r_time + r_boundary + r_proximity
         return reward, terminated
