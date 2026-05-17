@@ -174,8 +174,8 @@ class DroneGymEnv(gym.Env):
     """
 
     # 最大速度: 1.5 m/s, 與 Paper 2 NormalizedV 範圍 [-1, 1] 相符. 
-    # 測試 0.8:
-    MAX_SPEED = 0.8
+    # 測試 1.0
+    MAX_SPEED = 1.0
 
     # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
     # "when the distance value is less than 40 cm, grant a reward of +100. "
@@ -306,9 +306,10 @@ class DroneGymEnv(gym.Env):
         """每步執行動作並回傳新狀態. """
         # 1. 把 action clip 到安全範圍
         action = np.clip(action, -self.MAX_SPEED, self.MAX_SPEED)
+        real_velocity = action * 0.8
 
         # 2. 發指令給無人機, 等模擬器更新
-        self.ros.send_velocity(*action)
+        self.ros.send_velocity(*real_velocity)
         rclpy.spin_once(self.ros, timeout_sec=0.1)
         self.step_count += 1
 
@@ -358,9 +359,7 @@ class DroneGymEnv(gym.Env):
             curr_dist = 10.0
 
         # --- 1. 距離縮短獎勵 ---
-        # r_progress = 10.0 * (self.prev_dist - curr_dist)
-        # 修改: 負距離, 距離越近 reward 越高, 訊號穩定不被抵消
-        r_progress = 0.1*-curr_dist
+        r_progress = 5.0 * (self.prev_dist - curr_dist)
         self.prev_dist = curr_dist
 
         # --- 2. 到達獎勵 ---
@@ -371,7 +370,7 @@ class DroneGymEnv(gym.Env):
 
         # --- 3. 時間懲罰 ---
         # 時間懲罰從 -0.5 降到 -0.05: 
-        # 目前 200步 * (-0.05) = -10 剛好等於整個 episode 的 reward, 
+        # 200步 * (-0.5) = -100 剛好等於整個 episode 的 reward, 
         # 導致 r_progress 的訊號完全被時間懲罰蓋過, agent 分不清楚飛近目標有沒有用. 
         # 降低時間懲罰讓距離縮短獎勵成為主要學習訊號. 
         r_time = -0.05
@@ -385,7 +384,6 @@ class DroneGymEnv(gym.Env):
             pos[2] < self.BOUNDARY_Z_MIN
         )
         if out_of_bounds:
-            # 活著 200 步大約會被扣 40(距離) + 10(時間) = 50 分。
             # 邊界懲罰必須設為 -200，讓模型知道撞牆自殺的下場比活著找目標慘非常多。
             r_boundary = -200.0
             terminated = True
@@ -393,7 +391,8 @@ class DroneGymEnv(gym.Env):
         # 新增: 
         # --- 5. 蘿蔔引導(常駐正回饋) ---
         # 只要待在目標半徑 2 公尺內, 每步都給微小加分, 抵銷時間懲罰
-        r_proximity = 0.1 if curr_dist < 2.0 else 0.0
+        # r_proximity = 0.1 if curr_dist < 2.0 else 0.0
+        r_proximity = 0.0
 
         # 新增: 將各項獎勵累加到內部記錄器中
         self.ep_components['progress']  += r_progress
@@ -434,6 +433,9 @@ class DroneGymEnv(gym.Env):
         # nan_to_num 防止感測器資料異常造成神經網路崩潰
         obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
         obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
+
+        # 將觀測值除以最大邊界，正規化到 [-1, 1] 的範圍
+        obs = obs / self.observation_space.high
         return obs
 
     def get_logger(self):
