@@ -201,8 +201,8 @@ class DroneGymEnv(gym.Env):
     # 目標點隨機範圍: 依據 Paper 3 Section 4.2 的場景設計, 
     # 目標在 x/y [-5, 5], z [1, 3] 的安全空間內隨機生成. 
     # 修改: 把原本的 +-5.0 改小, 原本的太大很難在 300000 內收斂
-    TARGET_LOW  = np.array([-1.0, -1.0, 1.0], dtype=np.float32)
-    TARGET_HIGH = np.array([ 1.0,  1.0, 3.0], dtype=np.float32)      
+    TARGET_LOW  = np.array([-0.5, -0.5, 1.0], dtype=np.float32)
+    TARGET_HIGH = np.array([ 0.5,  0.5, 3.0], dtype=np.float32)      
 
     # 等待起飛的最小安全高度: 確認無人機已真正離地才開始 Episode. 
     MIN_HOVER_Z = 0.8
@@ -385,14 +385,15 @@ class DroneGymEnv(gym.Env):
         )
         if out_of_bounds:
             # 邊界懲罰必須設為 -200，讓模型知道撞牆自殺的下場比活著找目標慘非常多。
-            r_boundary = -200.0
+            r_boundary = -50.0
             terminated = True
 
         # 新增: 
         # --- 5. 蘿蔔引導(常駐正回饋) ---
         # 只要待在目標半徑 2 公尺內, 每步都給微小加分, 抵銷時間懲罰
         # r_proximity = 0.1 if curr_dist < 2.0 else 0.0
-        r_proximity = 0.0
+        # r_proximity = 0.0
+        r_proximity = max(0, 0.05 * (1 - curr_dist / 2.0))
 
         # 新增: 將各項獎勵累加到內部記錄器中
         self.ep_components['progress']  += r_progress

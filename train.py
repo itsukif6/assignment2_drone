@@ -244,7 +244,7 @@ def main():
             batch_size    = 64,
             gamma         = 0.99,
             gae_lambda    = 0.95,
-            ent_coef      = 0.0, # 從 0.05 改成 0.0
+            ent_coef      = 0.01, # 從 0.05 改成 0.01
             vf_coef       = 0.5,
             policy_kwargs = dict(
                 net_arch       = [256, 256],
