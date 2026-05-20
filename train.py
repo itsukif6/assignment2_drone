@@ -204,7 +204,7 @@ def main():
     #   Paper 1 Table 3: "Stop condition: Time-steps = 300000."
     #   Paper 3 Table 1 亦使用 150000-300000 步, 300000 是合理的起始值.
 
-    MODEL_PATH = "ppo_drone_1.0_to_0.7"
+    MODEL_PATH = "ppo_drone"
 
     # 檢查是否有之前訓練好的模型檔 (.zip)
     if os.path.exists(MODEL_PATH + ".zip"):
@@ -216,7 +216,7 @@ def main():
         callback = RewardLoggerCallback(save_dir='logs')
 
         # --- 開始訓練 ---
-        ADDITIONAL_TIMESTEPS = 500000
+        ADDITIONAL_TIMESTEPS = 700000
         print(f'\nStarting additional training for {ADDITIONAL_TIMESTEPS:,} timesteps...\n')
 
         try:
@@ -258,7 +258,7 @@ def main():
         callback = RewardLoggerCallback(save_dir='logs')
 
         # --- 開始訓練 ---
-        TOTAL_TIMESTEPS = 600_000
+        TOTAL_TIMESTEPS = 500_000
         print(f'\nStarting training for {TOTAL_TIMESTEPS:,} timesteps...\n')
 
         try:

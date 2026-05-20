@@ -186,8 +186,8 @@ class DroneGymEnv(gym.Env):
     # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
     # "when the distance value is less than 40 cm, grant a reward of +100. "
     # 測試 0.25:
-    # ARRIVE_DIST = 1.0
-    ARRIVE_DIST = 0.7
+    ARRIVE_DIST = 1.0
+    # ARRIVE_DIST = 0.7
     # ARRIVE_DIST = 0.4
 
     # 每個 Episode 最多步數 200 步(20 秒): 
@@ -343,6 +343,12 @@ class DroneGymEnv(gym.Env):
         # 5. 超時終止
         truncated = (self.step_count >= self.MAX_STEPS)
 
+        # 超時懲罰: 時間到了卻沒抵達，沒收基本獎勵
+        if truncated and not terminated:
+            r_timeout = -50.0  
+            reward += r_timeout
+            self.ep_components['time'] += r_timeout
+
         # 新增: 如果回合結束, 把這回合的細項打包進 info 傳出去
         info = {}
         if terminated or truncated:
@@ -378,34 +384,26 @@ class DroneGymEnv(gym.Env):
         if np.isnan(curr_dist):
             curr_dist = 10.0
 
-        # --- 1. 基礎生存與絕對距離懲罰 ---
-        # 保證 (0.2 - 0.04 * dist) 在初期微大於 0，消除「自殺」意願，
-        # 且隨距離縮短而增加，消除「原地發呆」意願。
-        r_alive = 0.2
-        r_dist = -0.04 * curr_dist
+        # --- 1. 時間流逝懲罰 (Paper 3: Time deduction item) ---
+        # 移除生存底薪，改為每步固定的微小懲罰，逼迫快速完工
+        r_time = -0.1
 
-        # --- 2. 距離縮短獎勵 (即時多巴胺) ---
-        r_progress = 1.0 * (self.prev_dist - curr_dist)
+        # --- 2. 距離縮短獎勵 (Paper 1 & 3: Distance continuous reward) ---
+        # 係數 10.0：放大梯度訊號，引導無人機朝目標移動
+        r_progress = 10.0 * (self.prev_dist - curr_dist)
         self.prev_dist = curr_dist
 
-        # --- 3. 到達獎勵 ---
-        # 壓低至 10.0 防止 Critic 網路梯度爆炸
+        # --- 3. 到達獎勵 (Paper 3 Section 4.2.1) ---
         r_arrive = 0.0
         if curr_dist < self.ARRIVE_DIST:
-            # 修復: 發放提早完工獎金
-            # 計算如果活滿 400 步還能領多少底薪，一次全部補發給它
-            remaining_steps = self.MAX_STEPS - self.step_count
-            time_bonus = remaining_steps * 0.2  # 0.2 是 r_alive 的值
-            
-            # 總獎金 = 基礎到達獎金(50) + 剩餘底薪補償
-            r_arrive = 50.0 + time_bonus
+            r_arrive = 100.0  # 論文標準值 +100
             terminated = True
 
-        # --- 4. 邊界與姿態墜機保護 ---
+        # --- 4. 邊界與姿態墜機保護 (Paper 3 Section 4.2.1) ---
         r_boundary = 0.0
         tilt_angle = self._get_tilt_angle()
-        is_crashed = tilt_angle > (np.pi / 4.0)  # 大於 45 度視為墜機
-
+        is_crashed = tilt_angle > (np.pi / 4.0)
+        
         out_of_bounds = (
             abs(pos[0]) > self.BOUNDARY_XY or
             abs(pos[1]) > self.BOUNDARY_XY or
@@ -414,17 +412,17 @@ class DroneGymEnv(gym.Env):
         )
         
         if out_of_bounds or is_crashed:
-            r_boundary = -10.0
+            r_boundary = -100.0  # 論文標準值 -100
             terminated = True
 
         # 更新記錄器
         self.ep_components['progress']  += r_progress
-        self.ep_components['r_alive + r_dist'] += r_alive + r_dist
+        self.ep_components['r_alive + r_dist'] += 0.0  # 廢棄
         self.ep_components['arrive']    += r_arrive
-        self.ep_components['time']      += 0.0              # 廢棄 time，設為 0
+        self.ep_components['time']      += r_time
         self.ep_components['boundary']  += r_boundary
 
-        reward = r_alive + r_dist + r_progress + r_arrive + r_boundary
+        reward = r_time + r_progress + r_arrive + r_boundary
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:
