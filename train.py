@@ -86,7 +86,7 @@ class RewardLoggerCallback(BaseCallback):
 
                 print(f'Episode {ep:4d} | Total Mean: {recent_mean:7.2f} | '
                       f'Prog: {avg_comp["progress"]:6.2f} | '
-                      f'Prox: {avg_comp["proximity"]:5.2f} | '
+                      f'Alive + Dist: {avg_comp["r_alive + r_dist"]:5.2f} | '
                       f'Arrive: {avg_comp["arrive"]:5.2f} | '
                       f'Time: {avg_comp["time"]:6.2f} | '
                       f'Bound: {avg_comp["boundary"]:6.2f} | ')
@@ -204,7 +204,7 @@ def main():
     #   Paper 1 Table 3: "Stop condition: Time-steps = 300000."
     #   Paper 3 Table 1 亦使用 150000-300000 步, 300000 是合理的起始值.
 
-    MODEL_PATH = "ppo_drone"
+    MODEL_PATH = "ppo_drone_1.0_to_0.7"
 
     # 檢查是否有之前訓練好的模型檔 (.zip)
     if os.path.exists(MODEL_PATH + ".zip"):
@@ -216,7 +216,7 @@ def main():
         callback = RewardLoggerCallback(save_dir='logs')
 
         # --- 開始訓練 ---
-        ADDITIONAL_TIMESTEPS = 300000
+        ADDITIONAL_TIMESTEPS = 500000
         print(f'\nStarting additional training for {ADDITIONAL_TIMESTEPS:,} timesteps...\n')
 
         try:
@@ -230,9 +230,10 @@ def main():
             print('\nTraining interrupted. Saving current progress...')
 
         # --- 儲存模型 ---
-        NEW_MODEL_NAME = "ppo_drone_add_30w_ep"
+        # NEW_MODEL_NAME = "ppo_drone_1.0_to_0.7"
+        NEW_MODEL_NAME = "ppo_drone_0.7_2"
         model.save(NEW_MODEL_NAME)
-        print('\nModel saved to ppo_drone_add_30w_ep.zip')
+        print('\nModel saved to ppo_drone_0.7_2.zip')
     else:
         print("Using new model...")
         model = PPO(

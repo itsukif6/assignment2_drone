@@ -57,6 +57,8 @@ class DroneROSInterface(Node):
         # --- 儲存最新的感測值 ---
         self.current_pose  = np.zeros(3, dtype=np.float32)
         self.current_vel   = np.zeros(3, dtype=np.float32)
+        # 加入四元數儲存 [x, y, z, w]
+        self.current_quat  = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         self.pose_received = False
 
         # --- Publishers: 發指令給無人機 ---
@@ -90,9 +92,13 @@ class DroneROSInterface(Node):
         self.get_logger().info('DroneROSInterface initialized')
 
     def _pose_cb(self, msg: Pose):
-        """收到位置訊息, 更新 current_pose. """
+        """收到位置訊息, 更新 current_pose, current_quat. """
         self.current_pose = np.array(
             [msg.position.x, msg.position.y, msg.position.z],
+            dtype=np.float32
+        )
+        self.current_quat = np.array(
+            [msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w],
             dtype=np.float32
         )
         self.pose_received = True
@@ -180,12 +186,14 @@ class DroneGymEnv(gym.Env):
     # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
     # "when the distance value is less than 40 cm, grant a reward of +100. "
     # 測試 0.25:
-    ARRIVE_DIST = 0.4
+    # ARRIVE_DIST = 1.0
+    ARRIVE_DIST = 0.7
+    # ARRIVE_DIST = 0.4
 
     # 每個 Episode 最多步數 200 步(20 秒): 
     # Paper 2 Section IV 使用 1000 timesteps per episode(40ms/step = 40s). 
     # 本環境每步 0.1 秒, 200 步 = 20 秒, 足夠完成短距離目標導航. 
-    MAX_STEPS = 200
+    MAX_STEPS = 400
 
     # 邊界: x/y 最大 15m, z 最大 8m. 
     # 放寬至 15m 以避免訓練初期因探索而頻繁出界. 
@@ -224,11 +232,11 @@ class DroneGymEnv(gym.Env):
         # agent 同時感知自身位置、目標位置與當前速度, 
         # 加入相對位置與距離, 大幅降低神經網路的學習難度
         obs_limit = np.array(
-            [20, 20, 10,   # 無人機位置
-             20, 20, 10,   # 目標位置
-             40, 40, 20,   # 相對位置
-             5,  5,  5,    # 速度
-             50],          # 絕對距離
+            [5, 5, 5,   # 無人機位置
+             5, 5, 5,   # 目標位置
+             10, 10, 10,   # 相對位置
+             2,  2,  2,    # 速度
+             15],          # 絕對距離
             dtype=np.float32
         )
         self.observation_space = spaces.Box(
@@ -245,9 +253,16 @@ class DroneGymEnv(gym.Env):
 
         # 新增: 用來記錄每回合各項獎勵的累計值
         self.ep_components = {
-            'progress': 0.0, 'proximity': 0.0, 'arrive': 0.0, 
+            'progress': 0.0, 'r_alive + r_dist': 0.0, 'arrive': 0.0, 
             'time': 0.0, 'boundary': 0.0, 'action': 0.0, 'smooth': 0.0
         }
+
+    def _get_tilt_angle(self) -> float:
+        """計算機身 Z 軸與世界 Z 軸的夾角 (弧度)"""
+        x, y, z, w = self.ros.current_quat
+        z_z = 1.0 - 2.0 * (x**2 + y**2)
+        z_z = np.clip(z_z, -1.0, 1.0)
+        return float(np.arccos(z_z))
 
     def reset(self, seed=None, options=None):
         """
@@ -276,13 +291,18 @@ class DroneGymEnv(gym.Env):
         # --- Step 3: 發送起飛指令 ---
         self.ros.takeoff()
 
-        # --- Step 4: 等待起飛穩定 ---
-        # 持續 spin 直到 z 超過 MIN_HOVER_Z, 或等待超時(10 秒). 
-        # 確保無人機真正飛起來才開始 Episode, 避免第一步就觸發地板邊界. 
+        # --- Step 4: 等待起飛穩定 (起飛保護) ---
+        # 不只要等高度夠，還要強制它把速度降下來，平穩懸停後才開始訓練
         for _ in range(100):
+            # 強制發送 0 速度，壓制起飛時的側向滑行
+            self.ros.send_velocity(0.0, 0.0, 0.0)
             rclpy.spin_once(self.ros, timeout_sec=0.1)
+            
             if self.ros.current_pose[2] > self.MIN_HOVER_Z:
-                break
+                # 確保速度向量小於 0.2 m/s 才算穩定懸停
+                vel_norm = float(np.linalg.norm(self.ros.current_vel))
+                if vel_norm < 0.2:
+                    break
 
         # --- Step 5: 隨機生成目標點 ---
         self.target = self.np_random.uniform(
@@ -358,51 +378,53 @@ class DroneGymEnv(gym.Env):
         if np.isnan(curr_dist):
             curr_dist = 10.0
 
-        # --- 1. 距離縮短獎勵 ---
-        r_progress = 5.0 * (self.prev_dist - curr_dist)
+        # --- 1. 基礎生存與絕對距離懲罰 ---
+        # 保證 (0.2 - 0.04 * dist) 在初期微大於 0，消除「自殺」意願，
+        # 且隨距離縮短而增加，消除「原地發呆」意願。
+        r_alive = 0.2
+        r_dist = -0.04 * curr_dist
+
+        # --- 2. 距離縮短獎勵 (即時多巴胺) ---
+        r_progress = 1.0 * (self.prev_dist - curr_dist)
         self.prev_dist = curr_dist
 
-        # --- 2. 到達獎勵 ---
+        # --- 3. 到達獎勵 ---
+        # 壓低至 10.0 防止 Critic 網路梯度爆炸
         r_arrive = 0.0
         if curr_dist < self.ARRIVE_DIST:
-            r_arrive   = 100.0
+            # 修復: 發放提早完工獎金
+            # 計算如果活滿 400 步還能領多少底薪，一次全部補發給它
+            remaining_steps = self.MAX_STEPS - self.step_count
+            time_bonus = remaining_steps * 0.2  # 0.2 是 r_alive 的值
+            
+            # 總獎金 = 基礎到達獎金(50) + 剩餘底薪補償
+            r_arrive = 50.0 + time_bonus
             terminated = True
 
-        # --- 3. 時間懲罰 ---
-        # 時間懲罰從 -0.5 降到 -0.05: 
-        # 200步 * (-0.5) = -100 剛好等於整個 episode 的 reward, 
-        # 導致 r_progress 的訊號完全被時間懲罰蓋過, agent 分不清楚飛近目標有沒有用. 
-        # 降低時間懲罰讓距離縮短獎勵成為主要學習訊號. 
-        r_time = -0.05
-
-        # --- 4. 邊界懲罰 ---
+        # --- 4. 邊界與姿態墜機保護 ---
         r_boundary = 0.0
+        tilt_angle = self._get_tilt_angle()
+        is_crashed = tilt_angle > (np.pi / 4.0)  # 大於 45 度視為墜機
+
         out_of_bounds = (
             abs(pos[0]) > self.BOUNDARY_XY or
             abs(pos[1]) > self.BOUNDARY_XY or
             pos[2] > self.BOUNDARY_Z_MAX   or
             pos[2] < self.BOUNDARY_Z_MIN
         )
-        if out_of_bounds:
-            # 邊界懲罰必須設為 -200，讓模型知道撞牆自殺的下場比活著找目標慘非常多。
-            r_boundary = -50.0
+        
+        if out_of_bounds or is_crashed:
+            r_boundary = -10.0
             terminated = True
 
-        # 新增: 
-        # --- 5. 蘿蔔引導(常駐正回饋) ---
-        # 只要待在目標半徑 2 公尺內, 每步都給微小加分, 抵銷時間懲罰
-        # r_proximity = 0.1 if curr_dist < 2.0 else 0.0
-        # r_proximity = 0.0
-        r_proximity = max(0, 0.05 * (1 - curr_dist / 2.0))
-
-        # 新增: 將各項獎勵累加到內部記錄器中
+        # 更新記錄器
         self.ep_components['progress']  += r_progress
-        self.ep_components['proximity'] += r_proximity
+        self.ep_components['r_alive + r_dist'] += r_alive + r_dist
         self.ep_components['arrive']    += r_arrive
-        self.ep_components['time']      += r_time
+        self.ep_components['time']      += 0.0              # 廢棄 time，設為 0
         self.ep_components['boundary']  += r_boundary
 
-        reward = r_progress + r_arrive + r_time + r_boundary + r_proximity
+        reward = r_alive + r_dist + r_progress + r_arrive + r_boundary
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:
