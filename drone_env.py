@@ -187,7 +187,7 @@ class DroneGymEnv(gym.Env):
     # "when the distance value is less than 40 cm, grant a reward of +100. "
     # 測試 0.25:
     ARRIVE_DIST = 1.0
-    # ARRIVE_DIST = 0.7
+    # ARRIVE_DIST = 0.85
     # ARRIVE_DIST = 0.4
 
     # 每個 Episode 最多步數 200 步(20 秒): 
@@ -253,7 +253,7 @@ class DroneGymEnv(gym.Env):
 
         # 新增: 用來記錄每回合各項獎勵的累計值
         self.ep_components = {
-            'progress': 0.0, 'r_alive + r_dist': 0.0, 'arrive': 0.0, 
+            'progress': 0.0, 'arrive': 0.0, 
             'time': 0.0, 'boundary': 0.0, 'action': 0.0, 'smooth': 0.0
         }
 
@@ -417,7 +417,6 @@ class DroneGymEnv(gym.Env):
 
         # 更新記錄器
         self.ep_components['progress']  += r_progress
-        self.ep_components['r_alive + r_dist'] += 0.0  # 廢棄
         self.ep_components['arrive']    += r_arrive
         self.ep_components['time']      += r_time
         self.ep_components['boundary']  += r_boundary
