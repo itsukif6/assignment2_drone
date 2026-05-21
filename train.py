@@ -213,13 +213,19 @@ def main():
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
     print('Pose data received. Starting training.')
 
-    MODEL_PATH = "ppo_drone"
+    MODEL_PATH = "ppo_drone_1.0_2"
 
     # 檢查是否有之前訓練好的模型檔 (.zip)
     if os.path.exists(MODEL_PATH + ".zip"):
         print(f"Model found: {MODEL_PATH}.zip, continue training...")
         # 載入舊模型，並綁定當前的環境
-        model = PPO.load(MODEL_PATH, env=env, learning_rate=1e-4)
+        model = PPO.load(
+            MODEL_PATH, 
+            env=env, 
+            custom_objects={
+            'learning_rate': 3e-5,  # 強避震器步長
+            'ent_coef': 0.001       # 壓低隨機探索雜訊
+        })
 
         # --- 設定 Callback ---
         callback = RewardLoggerCallback(save_dir='logs')
@@ -239,9 +245,9 @@ def main():
             print('\nTraining interrupted via keyboard. Saving current progress...')
 
         # --- 儲存模型 ---
-        NEW_MODEL_NAME = "ppo_drone_1.0_2.zip"
+        NEW_MODEL_NAME = "ppo_drone_0.85.zip"
         model.save(NEW_MODEL_NAME)
-        print(f'\nModel saved to {NEW_MODEL_NAME}.zip')
+        print(f'\nModel saved to {NEW_MODEL_NAME}')
     else:
         print("Using new model...")
         model = PPO(
