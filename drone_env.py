@@ -185,10 +185,9 @@ class DroneGymEnv(gym.Env):
 
     # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
     # "when the distance value is less than 40 cm, grant a reward of +100. "
-    # 測試 0.25:
     # ARRIVE_DIST = 1.0
-    ARRIVE_DIST = 0.85
-    # ARRIVE_DIST = 0.4
+    # ARRIVE_DIST = 0.85
+    ARRIVE_DIST = 0.75
 
     # 每個 Episode 最多步數 200 步(20 秒): 
     # Paper 2 Section IV 使用 1000 timesteps per episode(40ms/step = 40s). 

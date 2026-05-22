@@ -213,7 +213,7 @@ def main():
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
     print('Pose data received. Starting training.')
 
-    MODEL_PATH = "ppo_drone_1.0_2"
+    MODEL_PATH = "ppo_drone_0.85"
 
     # 檢查是否有之前訓練好的模型檔 (.zip)
     if os.path.exists(MODEL_PATH + ".zip"):
@@ -223,8 +223,9 @@ def main():
             MODEL_PATH, 
             env=env, 
             custom_objects={
-            'learning_rate': 3e-5,  # 強避震器步長
-            'ent_coef': 0.001       # 壓低隨機探索雜訊
+            'learning_rate': 1e-5,  # 強避震器步長
+            'ent_coef': 0.002,       # 壓低隨機探索雜訊
+            'max_grad_norm': 0.5  # 限制梯度反傳幅度的物理保險
         })
 
         # --- 設定 Callback ---
@@ -245,7 +246,7 @@ def main():
             print('\nTraining interrupted via keyboard. Saving current progress...')
 
         # --- 儲存模型 ---
-        NEW_MODEL_NAME = "ppo_drone_0.85.zip"
+        NEW_MODEL_NAME = "ppo_drone_0.75.zip"
         model.save(NEW_MODEL_NAME)
         print(f'\nModel saved to {NEW_MODEL_NAME}')
     else:
@@ -259,7 +260,7 @@ def main():
             batch_size    = 64,
             gamma         = 0.99,
             gae_lambda    = 0.95,
-            ent_coef      = 0.0,
+            ent_coef      = 0.01,
             vf_coef       = 0.5,
             policy_kwargs = dict(
                 net_arch       = [256, 256],
