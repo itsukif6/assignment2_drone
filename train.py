@@ -115,6 +115,7 @@ class RewardLoggerCallback(BaseCallback):
 
                     print(f'Episode {ep:4d} | Total Mean: {recent_mean:7.2f} | '
                           f'Prog: {avg_comp["progress"]:6.2f} | '
+                          f'Prox: {avg_comp["proximity"]:6.2f} | '
                           f'Arrive: {avg_comp["arrive"]:5.2f} | '
                           f'Time: {avg_comp["time"]:6.2f} | '
                           f'Bound: {avg_comp["boundary"]:6.2f} | ', end='')
@@ -213,7 +214,7 @@ def main():
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
     print('Pose data received. Starting training.')
 
-    MODEL_PATH = "ppo_drone_0.85"
+    MODEL_PATH = "ppo_drone_0.75"
 
     # 檢查是否有之前訓練好的模型檔 (.zip)
     if os.path.exists(MODEL_PATH + ".zip"):
@@ -246,7 +247,7 @@ def main():
             print('\nTraining interrupted via keyboard. Saving current progress...')
 
         # --- 儲存模型 ---
-        NEW_MODEL_NAME = "ppo_drone_0.75.zip"
+        NEW_MODEL_NAME = "ppo_drone_0.75_2.zip"
         model.save(NEW_MODEL_NAME)
         print(f'\nModel saved to {NEW_MODEL_NAME}')
     else:

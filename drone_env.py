@@ -253,7 +253,7 @@ class DroneGymEnv(gym.Env):
         # 新增: 用來記錄每回合各項獎勵的累計值
         self.ep_components = {
             'progress': 0.0, 'arrive': 0.0, 
-            'time': 0.0, 'boundary': 0.0, 'action': 0.0, 'smooth': 0.0
+            'time': 0.0, 'boundary': 0.0, 'proximity': 0.0
         }
 
     def _get_tilt_angle(self) -> float:
@@ -342,11 +342,11 @@ class DroneGymEnv(gym.Env):
         # 5. 超時終止
         truncated = (self.step_count >= self.MAX_STEPS)
 
-        # 超時懲罰: 時間到了卻沒抵達，沒收基本獎勵
-        if truncated and not terminated:
-            r_timeout = -50.0  
-            reward += r_timeout
-            self.ep_components['time'] += r_timeout
+        # # 超時懲罰: 時間到了卻沒抵達，沒收基本獎勵
+        # if truncated and not terminated:
+        #     r_timeout = -50.0  
+        #     reward += r_timeout
+        #     self.ep_components['time'] += r_timeout
 
         # 新增: 如果回合結束, 把這回合的細項打包進 info 傳出去
         info = {}
@@ -387,10 +387,15 @@ class DroneGymEnv(gym.Env):
         # 移除生存底薪，改為每步固定的微小懲罰，逼迫快速完工
         r_time = -0.1
 
-        # --- 2. 距離縮短獎勵 (Paper 1 & 3: Distance continuous reward) ---
-        # 係數 10.0：放大梯度訊號，引導無人機朝目標移動
+        # --- 2. 距離縮短獎勵 ---
         r_progress = 10.0 * (self.prev_dist - curr_dist)
         self.prev_dist = curr_dist
+
+        # --- 2.5 近距離指數獎勵 ---
+        # 越靠近目標，額外獎勵指數增加
+        r_proximity = 0.0
+        if curr_dist < self.ARRIVE_DIST * 2.0:
+            r_proximity = 0.5 * np.exp(3.0 * (1.0 - curr_dist / self.ARRIVE_DIST))
 
         # --- 3. 到達獎勵 (Paper 3 Section 4.2.1) ---
         r_arrive = 0.0
@@ -415,12 +420,13 @@ class DroneGymEnv(gym.Env):
             terminated = True
 
         # 更新記錄器
-        self.ep_components['progress']  += r_progress
-        self.ep_components['arrive']    += r_arrive
         self.ep_components['time']      += r_time
+        self.ep_components['progress']  += r_progress
+        self.ep_components['proximity'] += r_proximity
+        self.ep_components['arrive']    += r_arrive
         self.ep_components['boundary']  += r_boundary
 
-        reward = r_time + r_progress + r_arrive + r_boundary
+        reward = r_time + r_progress + r_proximity + r_arrive + r_boundary
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:
