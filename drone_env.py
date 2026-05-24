@@ -185,9 +185,9 @@ class DroneGymEnv(gym.Env):
 
     # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
     # "when the distance value is less than 40 cm, grant a reward of +100. "
-    # ARRIVE_DIST = 1.0
+    ARRIVE_DIST = 1.0
     # ARRIVE_DIST = 0.85
-    ARRIVE_DIST = 0.75
+    # ARRIVE_DIST = 0.75
 
     # 每個 Episode 最多步數 200 步(20 秒): 
     # Paper 2 Section IV 使用 1000 timesteps per episode(40ms/step = 40s). 
@@ -203,7 +203,7 @@ class DroneGymEnv(gym.Env):
     # 地板邊界設為 -1.0(實際不會觸發): 
     # /reset_world 後無人機在地面, 需等待起飛才開始計算 reward, 
     # 設為負值避免起飛過渡期誤判出界. 
-    BOUNDARY_Z_MIN = -1.0
+    BOUNDARY_Z_MIN = 0.0
 
     # 目標點隨機範圍: 依據 Paper 3 Section 4.2 的場景設計, 
     # 目標在 x/y [-5, 5], z [1, 3] 的安全空間內隨機生成. 
@@ -252,8 +252,8 @@ class DroneGymEnv(gym.Env):
 
         # 新增: 用來記錄每回合各項獎勵的累計值
         self.ep_components = {
-            'progress': 0.0, 'arrive': 0.0, 
-            'time': 0.0, 'boundary': 0.0, 'proximity': 0.0
+            'progress': 0.0, 'arrive': 0.0, 'boundary_s': 0.0,
+            'time': 0.0, 'boundary': 0.0, 'proximity': 0.0, 'attitude': 0.0, 'soft_boundary': 0.0
         }
 
     def _get_tilt_angle(self) -> float:
@@ -312,6 +312,7 @@ class DroneGymEnv(gym.Env):
 
         # 計算初始距離, nan 時給預設值
         self.prev_dist = float(np.linalg.norm(self.ros.current_pose - self.target))
+        # print(f"[Reset] Initial dist: {self.prev_dist:.3f}m")
         if np.isnan(self.prev_dist):
             self.prev_dist = 5.0
 
@@ -342,11 +343,11 @@ class DroneGymEnv(gym.Env):
         # 5. 超時終止
         truncated = (self.step_count >= self.MAX_STEPS)
 
-        # # 超時懲罰: 時間到了卻沒抵達，沒收基本獎勵
-        # if truncated and not terminated:
-        #     r_timeout = -50.0  
-        #     reward += r_timeout
-        #     self.ep_components['time'] += r_timeout
+        # 超時懲罰: 時間到了卻沒抵達，沒收基本獎勵
+        if truncated and not terminated:
+            r_timeout = -50.0  
+            reward += r_timeout
+            self.ep_components['time'] += r_timeout
 
         # 新增: 如果回合結束, 把這回合的細項打包進 info 傳出去
         info = {}
@@ -385,48 +386,79 @@ class DroneGymEnv(gym.Env):
 
         # --- 1. 時間流逝懲罰 (Paper 3: Time deduction item) ---
         # 移除生存底薪，改為每步固定的微小懲罰，逼迫快速完工
-        r_time = -0.1
+        r_time = -0.1 
 
-        # --- 2. 距離縮短獎勵 ---
-        r_progress = 10.0 * (self.prev_dist - curr_dist)
+        # --- 2. 距離縮短獎勵: 只獎勵靠近，杜絕來回套利 ---
+        delta = self.prev_dist - curr_dist
+        # r_progress = 8.0 * max(0.0, delta)
+        r_progress = 8.0 * max(0.0, delta) - 3.0 * max(0.0, -delta)
         self.prev_dist = curr_dist
 
-        # --- 2.5 近距離指數獎勵 ---
-        # 越靠近目標，額外獎勵指數增加
+        # 3. 近距離獎勵：加上限，修正邊界不連續
         r_proximity = 0.0
-        if curr_dist < self.ARRIVE_DIST * 2.0:
-            r_proximity = 0.5 * np.exp(3.0 * (1.0 - curr_dist / self.ARRIVE_DIST))
+        if self.ARRIVE_DIST > 0 and curr_dist < self.ARRIVE_DIST * 3.0:
+            # 在觸發邊界處平滑接入（乘以線性開關）
+            gate = 1.0 - curr_dist / (self.ARRIVE_DIST * 3.0)
+            raw = 1.0 * np.exp(3.0 * (1.0 - curr_dist / self.ARRIVE_DIST))
+            r_proximity = min(raw, 8.0) * gate
 
-        # --- 3. 到達獎勵 (Paper 3 Section 4.2.1) ---
-        r_arrive = 0.0
-        if curr_dist < self.ARRIVE_DIST:
-            r_arrive = 100.0  # 論文標準值 +100
-            terminated = True
+        # # 4. 姿態連續懲罰（新增）：不再等到 45° 才終止
+        # tilt_angle = self._get_tilt_angle()
+        # r_attitude = -1.0 * (tilt_angle / (np.pi / 4.0)) ** 2   # 0°→0, 45°→-1
 
-        # --- 4. 邊界與姿態墜機保護 (Paper 3 Section 4.2.1) ---
-        r_boundary = 0.0
-        tilt_angle = self._get_tilt_angle()
-        is_crashed = tilt_angle > (np.pi / 4.0)
+
+        # MARGIN = 0.3
+        # excess_x = max(0.0, abs(pos[0]) - (self.BOUNDARY_XY - MARGIN))
+        # excess_y = max(0.0, abs(pos[1]) - (self.BOUNDARY_XY - MARGIN))
+        # excess_z = max(0.0, pos[2] - (self.BOUNDARY_Z_MAX - MARGIN))
+        # r_soft_boundary = -0.8 * (excess_x + excess_y + excess_z) / MARGIN
+
+        # # 在軟邊界區域內，速度越快懲罰越重
+        # speed = float(np.linalg.norm(self.ros.current_vel))
+        # boundary_proximity = max(
+        #     max(0.0, abs(pos[0]) - (self.BOUNDARY_XY - 0.8)),
+        #     max(0.0, abs(pos[1]) - (self.BOUNDARY_XY - 0.8))
+        # ) / 0.8  # 0~1
+
+        # r_boundary_speed = -0.8 * boundary_proximity * speed
         
+        # 5. 終止條件（修正優先級）
+        r_boundary = 0.0
+        r_arrive   = 0.0
+
+        tilt_angle    = self._get_tilt_angle()
+        is_crashed    = tilt_angle > (np.pi / 3.0)
         out_of_bounds = (
             abs(pos[0]) > self.BOUNDARY_XY or
             abs(pos[1]) > self.BOUNDARY_XY or
             pos[2] > self.BOUNDARY_Z_MAX   or
             pos[2] < self.BOUNDARY_Z_MIN
         )
-        
-        if out_of_bounds or is_crashed:
-            r_boundary = -100.0  # 論文標準值 -100
+
+        if out_of_bounds or is_crashed:          # ← 優先判斷失敗
+            r_boundary = -100.0
             terminated = True
+        elif curr_dist < self.ARRIVE_DIST:            # ← 安全到達才給獎勵
+            # speed = np.linalg.norm(self.ros.current_vel)
+            # r_arrive = 100.0 - 10.0 * min(speed, self.MAX_SPEED)  # 速度越慢獎勵越高
+            r_arrive = 100.0
+            terminated = True
+
+        r_attitude = 0
+        r_boundary_speed = 0
+        r_soft_boundary = 0
 
         # 更新記錄器
         self.ep_components['time']      += r_time
         self.ep_components['progress']  += r_progress
         self.ep_components['proximity'] += r_proximity
+        self.ep_components['attitude']  += r_attitude
         self.ep_components['arrive']    += r_arrive
         self.ep_components['boundary']  += r_boundary
+        self.ep_components['boundary_s']  += r_boundary_speed
+        self.ep_components['soft_boundary'] += r_soft_boundary
 
-        reward = r_time + r_progress + r_proximity + r_arrive + r_boundary
+        reward = r_time + r_progress + r_proximity + r_attitude + r_soft_boundary + r_boundary + r_arrive + r_boundary_speed
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:

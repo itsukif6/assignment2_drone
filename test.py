@@ -31,14 +31,15 @@ from drone_env import DroneROSInterface, DroneGymEnv
 # 用來和 RL agent 比較
 # ================================================================
 def run_baseline_episode(ros: DroneROSInterface, target: np.ndarray,
-                          max_steps: int = 300) -> dict:
+                          arrive_dist: float,
+                          max_steps: int = 400) -> dict:
     """
     用 P 控制器飛一個 episode, 回傳結果統計. 
     Kp 和 max_speed 與 fly_straight.py 預設值相同. 
     """
     KP        = 0.5
     MAX_SPEED = 1.0
-    ARRIVE    = 0.3
+    ARRIVE    = arrive_dist
 
     total_reward = 0.0
     success = False
@@ -80,6 +81,8 @@ def main():
     parser.add_argument('--episodes', type=int,   default=10,        help='Test rounds')
     parser.add_argument('--model',    type=str,   default='ppo_drone', help='Model name without zip')
     parser.add_argument('--baseline', action='store_true',            help='Run P controller baseline')
+    parser.add_argument('--stochastic', action='store_true',
+                        help='Use stochastic policy (closer to training behavior)')
     args = parser.parse_args()
 
     # --- 初始化 ---
@@ -98,10 +101,10 @@ def main():
         mode = 'baseline'
         model = None
     else:
-        print(f'\nLoad model: {args.model}.zip')
-        model = PPO.load(args.model)
+        model = PPO.load(args.model, env=env)   # ← 綁定 env
         mode  = 'rl'
-        print(f'Model load success, start testing {args.episodes} episodes\n')
+        deterministic = not args.stochastic      # ← 可切換
+        print(f'Model: {args.model} | Policy: {"stochastic" if args.stochastic else "deterministic"}')
 
     # --- 跑測試 ---
     results = []
@@ -115,7 +118,7 @@ def main():
 
         if mode == 'baseline':
             # P 控制器模式
-            result = run_baseline_episode(ros, target)
+            result    = run_baseline_episode(ros, target, env.ARRIVE_DIST)
             success   = result['success']
             ep_steps  = result['steps']
             ep_reward = result['reward']

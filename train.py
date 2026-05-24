@@ -43,7 +43,7 @@ class RewardLoggerCallback(BaseCallback):
     新增：當連續 5 次日誌（共 50 回合）滿足 Arrive >= 60.00 且 Bound == 0.00 時，會自動終止訓練。
     """
 
-    def __init__(self, save_dir: str = 'logs', verbose=0):
+    def __init__(self, save_dir='logs', model_save_path='best_model', verbose=0):
         super().__init__(verbose)
         os.makedirs(save_dir, exist_ok=True)
         self.save_dir = save_dir
@@ -55,6 +55,13 @@ class RewardLoggerCallback(BaseCallback):
         
         # 記錄過去 10 回合的細項, 用來算平均
         self.recent_components = []
+
+        self.model_save_path  = model_save_path
+        self.best_arrive      = 0.0
+        self.best_bound       = -999.0
+
+        self.best_det_rate = 0.0
+        self._last_bound_ok = True   # 可追蹤最近是否有墜機
 
         # --- 自動停止核心計數器 ---
         self.consecutive_success_checks = 0
@@ -81,31 +88,94 @@ class RewardLoggerCallback(BaseCallback):
         # 標記這次新訓練產生的數據起點
         self._new_episodes_start_idx = len(self.episode_rewards)
 
+    # def _on_step(self) -> bool:
+    #     """每步都會被呼叫. """
+    #     # 累計這一步的總 reward
+    #     self._current_ep_reward += self.locals['rewards'][0]
+
+    #     # 檢查是否有傳出 infos ( 包含回合結束時的細項 ) 
+    #     for info in self.locals.get('infos', []):
+    #         if 'ep_components' in info:
+    #             self.recent_components.append(info['ep_components'])
+
+    #     # 如果這個 episode 結束了 ( done = terminated or truncated ) 
+    #     dones = self.locals.get('dones', [False])
+    #     if dones[0]:
+    #         self.episode_rewards.append(self._current_ep_reward)
+    #         self._current_ep_reward = 0.0
+
+    #         # 每 10 個 episode 印一次進度與細項平均
+    #         ep = len(self.episode_rewards)
+            
+    #         # 確保我們有新的 components 可以算平均
+    #         if len(self.recent_components) >= 10:
+    #             if (ep - self._new_episodes_start_idx) % 10 == 0:
+    #                 recent_mean = np.mean(self.episode_rewards[-10:])
+
+    #                 avg_comp = {k: 0.0 for k in self.recent_components[0].keys()}
+    #                 for comp in self.recent_components[-10:]:
+    #                     for k, v in comp.items():
+    #                         avg_comp[k] += v
+    #                 for k in avg_comp.keys():
+    #                     avg_comp[k] /= 10.0
+
+    #                 # 取出關鍵指標
+    #                 arrive = avg_comp["arrive"]
+    #                 bound  = avg_comp["boundary"]
+
+    #                 print(f'Episode {ep:4d} | Total Mean: {recent_mean:7.2f} | '
+    #                     f'Prog: {avg_comp["progress"]:6.2f} | '
+    #                     f'Prox: {avg_comp["proximity"]:6.2f} | '
+    #                     f'Arrive: {arrive:5.2f} | '
+    #                     f'Time: {avg_comp["time"]:6.2f} | '
+    #                     f'Bound: {bound:6.2f} | ', end='')
+
+    #                 # 創新高就存檔（合併成一個邏輯塊）
+    #                 if arrive > self.best_arrive and bound == 0.0:
+    #                     self.best_arrive = arrive
+    #                     self.model.save(self.model_save_path)
+    #                     print(f'-> [Best saved] Arrive: {arrive:.2f}')
+    #                     # 同時也計入連續成功
+    #                     if arrive >= 70.0:
+    #                         self.consecutive_success_checks += 1
+    #                         print(f'   [Success: {self.consecutive_success_checks}/5]')
+    #                         if self.consecutive_success_checks >= 5:
+    #                             print('\n[Auto-Stop] Training complete.')
+    #                             self.should_stop_training = True
+    #                 elif arrive >= 70.0 and bound == 0.0:
+    #                     self.consecutive_success_checks += 1
+    #                     print(f'-> [Success: {self.consecutive_success_checks}/5]')
+    #                     if self.consecutive_success_checks >= 5:
+    #                         print('\n[Auto-Stop] Training complete.')
+    #                         self.should_stop_training = True
+    #                 else:
+    #                     if self.consecutive_success_checks > 0:
+    #                         print('-> [Reset]')
+    #                     else:
+    #                         print('')
+    #                     self.consecutive_success_checks = 0
+
+    #                 self.recent_components = self.recent_components[-10:]
+
+    #     # 當 should_stop_training 為 True 時，回傳 False 會讓 Stable Baselines3 安全地跳出訓練迴圈
+    #     return not self.should_stop_training
     def _on_step(self) -> bool:
-        """每步都會被呼叫. """
-        # 累計這一步的總 reward
         self._current_ep_reward += self.locals['rewards'][0]
 
-        # 檢查是否有傳出 infos ( 包含回合結束時的細項 ) 
         for info in self.locals.get('infos', []):
             if 'ep_components' in info:
                 self.recent_components.append(info['ep_components'])
 
-        # 如果這個 episode 結束了 ( done = terminated or truncated ) 
         dones = self.locals.get('dones', [False])
         if dones[0]:
             self.episode_rewards.append(self._current_ep_reward)
             self._current_ep_reward = 0.0
-
-            # 每 10 個 episode 印一次進度與細項平均
             ep = len(self.episode_rewards)
-            
-            # 確保我們有新的 components 可以算平均
+
+            # --- Stochastic log：每 10 episode 印一次（參考用）---
             if len(self.recent_components) >= 10:
                 if (ep - self._new_episodes_start_idx) % 10 == 0:
                     recent_mean = np.mean(self.episode_rewards[-10:])
-                    
-                    # 計算過去 10 回合各細項的平均值
                     avg_comp = {k: 0.0 for k in self.recent_components[0].keys()}
                     for comp in self.recent_components[-10:]:
                         for k, v in comp.items():
@@ -113,35 +183,63 @@ class RewardLoggerCallback(BaseCallback):
                     for k in avg_comp.keys():
                         avg_comp[k] /= 10.0
 
-                    print(f'Episode {ep:4d} | Total Mean: {recent_mean:7.2f} | '
-                          f'Prog: {avg_comp["progress"]:6.2f} | '
-                          f'Prox: {avg_comp["proximity"]:6.2f} | '
-                          f'Arrive: {avg_comp["arrive"]:5.2f} | '
-                          f'Time: {avg_comp["time"]:6.2f} | '
-                          f'Bound: {avg_comp["boundary"]:6.2f} | ', end='')
-                    
-                    # --- 關鍵修改：自動判定畢業邏輯門 ---
-                    # 採用原版大尺度標準：Arrive 必須大於等於 60.00 且零墜機 Boundary 必須等於 0.00
-                    if avg_comp["arrive"] >= 60.00 and avg_comp["boundary"] == 0.00:
-                        self.consecutive_success_checks += 1
-                        print(f'-> [Success: {self.consecutive_success_checks}/5]')
-                        
-                        if self.consecutive_success_checks >= 5:
-                            print('\n\n[Auto-Stop] Successful training.')
-                            print('Stopping and saving...\n')
-                            self.should_stop_training = True
-                    else:
-                        if self.consecutive_success_checks > 0:
-                            print('-> [Stop.]')
-                        else:
-                            print('') # 純換行
-                        self.consecutive_success_checks = 0
-                    
-                    # 保持清單不要太長, 只留最近 10 筆
+                    arrive = avg_comp["arrive"]
+                    bound  = avg_comp["boundary"]
+
+                    print(f'Episode {ep:4d} | Mean: {recent_mean:7.2f} | '
+                        f'Prog: {avg_comp["progress"]:5.2f} | '
+                        f'Prox: {avg_comp["proximity"]:5.2f} | '
+                        f'Arrive(S): {arrive:5.2f} | '
+                        f'Time: {avg_comp["time"]:6.2f} | '
+                        f'Bound: {bound:5.2f}')
+
                     self.recent_components = self.recent_components[-10:]
 
-        # 當 should_stop_training 為 True 時，回傳 False 會讓 Stable Baselines3 安全地跳出訓練迴圈
+            # --- Deterministic eval：每 100 episode 評估一次（決策用）---
+            if (ep - self._new_episodes_start_idx) % 100 == 0 and ep > self._new_episodes_start_idx:
+                det_rate = self._eval_deterministic(n_episodes=30)
+                print(f'\n[Det Eval] Episode {ep} | '
+                    f'Deterministic Success: {det_rate*100:.0f}% ', end='')
+
+                if det_rate > self.best_det_rate and self._last_bound_ok:
+                    self.best_det_rate = det_rate
+                    self.model.save(self.model_save_path)
+                    print(f'-> [Best saved: {self.model_save_path}] Det: {det_rate*100:.0f}%', end='')
+
+                if det_rate >= 0.65:
+                    self.consecutive_success_checks += 1
+                    print(f'-> [Success: {self.consecutive_success_checks}/3]')
+                    if self.consecutive_success_checks >= 3:
+                        print('\n[Auto-Stop] Deterministic >= 65% × 3.')
+                        self.should_stop_training = True
+                else:
+                    if self.consecutive_success_checks > 0:
+                        print('-> [Reset]')
+                    else:
+                        print('')
+                    self.consecutive_success_checks = 0
+
         return not self.should_stop_training
+
+    def _eval_deterministic(self, n_episodes=10) -> float:
+        # 獨立環境，不干擾訓練
+        ros = self.locals['env'].envs[0].env.ros   # 重用同一個 ros 節點
+        env = DroneGymEnv(ros)
+        arrive_dist = env.ARRIVE_DIST
+
+        successes = 0
+        for _ in range(n_episodes):
+            obs, _ = env.reset()                   # Gymnasium 格式
+            terminated = truncated = False
+            while not (terminated or truncated):
+                action, _ = self.model.predict(obs, deterministic=True)
+                obs, _, terminated, truncated, _ = env.step(action)
+
+            dist = float(np.linalg.norm(ros.current_pose - env.target))
+            if dist < arrive_dist:
+                successes += 1
+
+        return successes / n_episodes
 
     def save_curve(self):
         """訓練結束後呼叫, 存 CSV 和訓練曲線圖. """
@@ -214,7 +312,7 @@ def main():
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
     print('Pose data received. Starting training.')
 
-    MODEL_PATH = "ppo_drone_0.75"
+    MODEL_PATH = "best_model_50"
 
     # 檢查是否有之前訓練好的模型檔 (.zip)
     if os.path.exists(MODEL_PATH + ".zip"):
@@ -224,13 +322,17 @@ def main():
             MODEL_PATH, 
             env=env, 
             custom_objects={
-            'learning_rate': 1e-5,  # 強避震器步長
-            'ent_coef': 0.002,       # 壓低隨機探索雜訊
-            'max_grad_norm': 0.5  # 限制梯度反傳幅度的物理保險
+            'learning_rate': 5e-6,  # 強避震器步長
+            'ent_coef': 0.005,       # 壓低隨機探索雜訊
+            'n_steps':  512,    # 從 1024 降到 512，更快反映當前 policy
         })
 
         # --- 設定 Callback ---
-        callback = RewardLoggerCallback(save_dir='logs')
+        # main() 裡
+        callback = RewardLoggerCallback(
+            save_dir='logs',
+            model_save_path='best_model'   # ← 加這個
+        )
 
         # --- 開始訓練 ---
         ADDITIONAL_TIMESTEPS = 700000
@@ -247,7 +349,7 @@ def main():
             print('\nTraining interrupted via keyboard. Saving current progress...')
 
         # --- 儲存模型 ---
-        NEW_MODEL_NAME = "ppo_drone_0.75_2.zip"
+        NEW_MODEL_NAME = "ppo_drone_1.0_3.zip"
         model.save(NEW_MODEL_NAME)
         print(f'\nModel saved to {NEW_MODEL_NAME}')
     else:
@@ -257,7 +359,7 @@ def main():
             env           = env,
             verbose       = 0,
             learning_rate = 3e-4,
-            n_steps       = 1024,
+            n_steps       = 512,
             batch_size    = 64,
             gamma         = 0.99,
             gae_lambda    = 0.95,
@@ -287,8 +389,8 @@ def main():
             print('\nTraining interrupted via keyboard. Saving current progress...')
 
         # --- 儲存模型 ---
-        model.save('ppo_drone')
-        print('\nModel saved to ppo_drone.zip')
+        model.save('ppo_drone_1.0_new')
+        print('\nModel saved to ppo_drone_1.0_new.zip')
 
     # --- 儲存訓練曲線 ---
     callback.save_curve()
