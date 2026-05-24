@@ -280,7 +280,10 @@ class DroneGymEnv(gym.Env):
         # 這是唯一能真正改變物理位置的方式, /simple_drone/reset Topic 只能
         # 清除控制器狀態, 無法移動無人機. 
         self.ros.reset_world()
+        # 2. 控制器重置：清空 PID 積分誤差，防止上回合的推力殘留
+        self.ros.soft_reset_pub.publish(Empty())
 
+        self.ros.send_velocity(0.0, 0.0, 0.0)
         # --- Step 2: 等待物理引擎穩定 ---
         # reset_world 後 Gazebo 需要幾個 tick 才能完成世界重置, 
         # 在此期間持續 spin 更新感測器資料. 
