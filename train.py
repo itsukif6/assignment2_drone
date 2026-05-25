@@ -35,6 +35,7 @@ in Controlling Quadrotor UAV Flight Actions." Drones.
 
 import os
 import csv
+import sys
 import argparse
 import numpy as np
 import matplotlib
@@ -47,6 +48,24 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
 from drone_env import DroneROSInterface, DroneGymEnv
+
+class DualLogger:
+    """
+    將標準輸出 (stdout) 同步寫入終端機與日誌檔。
+    確保所有 print()、SB3 訓練進度與報錯都能被完整儲存下來。
+    """
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() # 確保即時寫入硬碟，避免程式崩潰時遺失
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 def _save_level_snapshot(save_dir: str, models_dir: str, level: int,
                           episode_rewards: list,
@@ -313,6 +332,13 @@ class CurriculumCallback(BaseCallback):
 
 
 def main():
+    os.makedirs('logs', exist_ok=True)
+    log_file_path = os.path.join('logs', 'training_console.log')
+    
+    # 綁定標準輸出與標準錯誤到自定義的 Logger
+    sys.stdout = DualLogger(log_file_path)
+    sys.stderr = sys.stdout  # 讓潛在的報錯訊息也寫入同一個檔案
+
     parser = argparse.ArgumentParser(description="訓練無人機 PPO 模型 (支援課程學習)")
     parser.add_argument('--level', type=int, default=1, help='指定起始的課程等級 (1~7)')
     args = parser.parse_args()
