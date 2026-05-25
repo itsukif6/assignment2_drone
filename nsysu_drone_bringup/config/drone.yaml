@@ -9,16 +9,20 @@ rollpitchDifferentialGain: 5.0
 rollpitchLimit: 0.5
 
 # Proportional gain for yaw PID controller. Determines how strongly the drone responds to yaw position errors.
-yawProportionalGain: 2.0
+# yawProportionalGain: 2.0
+yawProportionalGain: 5.0
 # Differential gain for yaw PID controller. Dampens the rate of change of yaw error for smoother rotation.
 yawDifferentialGain: 1.0
 # Maximum absolute value for yaw control output, limiting rotational rate.
-yawLimit: 1.5
+# yawLimit: 1.5
+yawLimit: 3.0
 
 # Proportional gain for horizontal velocity PID controllers. Controls response to changes in horizontal velocity.
-velocityXYProportionalGain: 5.0
+# velocityXYProportionalGain: 5.0
+velocityXYProportionalGain: 10.0
 # Differential gain for horizontal velocity PID controllers. Controls acceleration/deceleration in horizontal plane.
-velocityXYDifferentialGain: 2.3
+# velocityXYDifferentialGain: 2.3
+velocityXYDifferentialGain: 4.0
 # Maximum limit for horizontal velocity control output, restricting maximum horizontal speed.
 velocityXYLimit: 2
 
@@ -50,7 +54,8 @@ positionZIntegralGain: 0.0
 positionZLimit: -1
 
 # Maximum force that the drone can exert, limiting maximum thrust to prevent aggressive maneuvers.
-maxForce: 30
+# maxForce: 30
+maxForce: 50
 # Parameter for adding small random noise to drone's motion. Set to zero, indicating no small noise addition.
 motionSmallNoise: 0.00
 # Parameter for drift noise. Set to zero, meaning no drift noise is being applied.

@@ -4,114 +4,55 @@ drone_env.py
 ------------
 Task B: 隨機目標導航(Random Target Navigation)
 將 NSYSU Drone 模擬環境包裝成 Gymnasium 相容的 Gym 環境. 
-
-重置機制說明: 
-    /simple_drone/reset(Topic): 控制器邏輯層, 只清除 PID 積分誤差與馬達指令, 
-                                  無法改變 Gazebo 物理引擎中的絕對座標. 
-    /reset_world(Service):      物理引擎層, 由 gazebo_ros 官方外掛提供, 
-                                  呼叫後 Gazebo 核心會強制將所有模型傳送回
-                                  URDF/SDF 定義的初始生成座標(Spawn Pose). 
-    結論: 強化學習每個 Episode 的完整重置必須呼叫 /reset_world Service. 
-
-參數調整依據: 
-    Paper 1: Tan & Karakose(2023), SoftwareX, PPO-based distributed deep RL for drone tracking. 
-    Paper 2: Zhang et al.(2024), AirPilot, PPO-based DRL auto-tuned nonlinear PID drone controller. 
-    Paper 3: Shen & Huang(2024), Drones, RL in controlling quadrotor UAV flight actions. 
-
-前置安裝: 
-    pip install stable-baselines3 gymnasium numpy
-
-使用方式: 
-    此檔案不直接執行, 由 train.py 和 test.py 匯入使用. 
 """
 
+import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, Pose
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, Bool
 from std_srvs.srv import Empty as EmptySrv
 
 import gymnasium as gym
 from gymnasium import spaces
 
-
-# ================================================================
-# Part 1: ROS 2 介面層
-# 負責和 Gazebo 溝通, 把 ROS topic/service 包成簡單的 get/set
-# ================================================================
 class DroneROSInterface(Node):
-    """
-    把 ROS 2 的 publisher/subscriber/service client 包裝成簡單的介面. 
-    Gym 環境透過這個物件和模擬器溝通, 不直接碰 ROS API. 
-
-    重置架構: 
-        軟重置(Soft Reset): send_velocity(0, 0, 0) -> 停止動作, 維持位置. 
-        硬重置(Hard Reset): reset_world() -> 呼叫 /reset_world Service, 
-                             強制 Gazebo 將無人機傳送回原點. 
-    """
-
     def __init__(self):
         super().__init__('rl_drone_interface')
 
-        # --- 儲存最新的感測值 ---
         self.current_pose  = np.zeros(3, dtype=np.float32)
         self.current_vel   = np.zeros(3, dtype=np.float32)
-        # 加入四元數儲存 [x, y, z, w]
         self.current_quat  = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        self.current_yaw   = 0.0
         self.pose_received = False
 
-        # --- Publishers: 發指令給無人機 ---
-        self.cmd_vel_pub = self.create_publisher(
-            Twist, '/simple_drone/cmd_vel', 10
-        )
-        self.takeoff_pub = self.create_publisher(
-            Empty, '/simple_drone/takeoff', 10
-        )
+        self.cmd_vel_pub = self.create_publisher(Twist, '/simple_drone/cmd_vel', 10)
+        self.takeoff_pub = self.create_publisher(Empty, '/simple_drone/takeoff', 10)
+        self.land_pub = self.create_publisher(Empty, '/simple_drone/land', 10)
+        self.vel_mode_pub = self.create_publisher(Bool, '/simple_drone/dronevel_mode', 10)
+        self.soft_reset_pub = self.create_publisher(Empty, '/simple_drone/reset', 10)
 
-        # /simple_drone/reset 只用於軟重置(清除控制器狀態), 
-        # 不能改變物理位置, 因此在硬重置流程中不使用. 
-        self.soft_reset_pub = self.create_publisher(
-            Empty, '/simple_drone/reset', 10
-        )
-
-        # --- Service Client: 硬重置物理世界 ---
-        # /reset_world 是 gazebo_ros 官方外掛提供的原生 Service. 
-        # 呼叫後 Gazebo 核心會強制將所有模型傳送回初始 Spawn Pose(通常是原點). 
-        # 這是強化學習 Episode 完整重置唯一可靠的方式. 
         self.reset_world_client = self.create_client(EmptySrv, '/reset_world')
 
-        # --- Subscribers: 接收無人機狀態 ---
-        self.pose_sub = self.create_subscription(
-            Pose,  '/simple_drone/gt_pose', self._pose_cb, 10
-        )
-        self.vel_sub  = self.create_subscription(
-            Twist, '/simple_drone/gt_vel',  self._vel_cb,  10
-        )
+        self.pose_sub = self.create_subscription(Pose, '/simple_drone/gt_pose', self._pose_cb, 10)
+        self.vel_sub  = self.create_subscription(Twist, '/simple_drone/gt_vel',  self._vel_cb,  10)
 
         self.get_logger().info('DroneROSInterface initialized')
 
     def _pose_cb(self, msg: Pose):
-        """收到位置訊息, 更新 current_pose, current_quat. """
-        self.current_pose = np.array(
-            [msg.position.x, msg.position.y, msg.position.z],
-            dtype=np.float32
-        )
-        self.current_quat = np.array(
-            [msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w],
-            dtype=np.float32
-        )
+        self.current_pose = np.array([msg.position.x, msg.position.y, msg.position.z], dtype=np.float32)
+        q = msg.orientation
+        self.current_quat = np.array([q.x, q.y, q.z, q.w], dtype=np.float32)
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self.current_yaw = float(np.arctan2(siny_cosp, cosy_cosp))
         self.pose_received = True
 
     def _vel_cb(self, msg: Twist):
-        """收到速度訊息, 更新 current_vel. """
-        self.current_vel = np.array(
-            [msg.linear.x, msg.linear.y, msg.linear.z],
-            dtype=np.float32
-        )
+        self.current_vel = np.array([msg.linear.x, msg.linear.y, msg.linear.z], dtype=np.float32)
 
     def send_velocity(self, vx: float, vy: float, vz: float):
-        """發布速度命令到 /simple_drone/cmd_vel. """
         msg = Twist()
         msg.linear.x  = float(vx)
         msg.linear.y  = float(vy)
@@ -122,103 +63,76 @@ class DroneROSInterface(Node):
         self.cmd_vel_pub.publish(msg)
 
     def reset_world(self) -> bool:
-        """
-        硬重置: 呼叫 /reset_world Service, 強制 Gazebo 將無人機傳送回原點. 
-
-        流程: 
-            1. 等待 /reset_world Service 可用(最多 5 秒). 
-            2. 非同步呼叫 Service, 並 spin 等待回應. 
-            3. 回傳是否成功. 
-
-        回傳值: 
-            True  -> 重置成功. 
-            False -> Service 不可用或呼叫超時. 
-        """
-        # 等待 Service 上線, 避免在模擬器尚未就緒時呼叫失敗
         if not self.reset_world_client.wait_for_service(timeout_sec=5.0):
             self.get_logger().warn('/reset_world service not available, skipping hard reset')
             return False
-
         req    = EmptySrv.Request()
         future = self.reset_world_client.call_async(req)
-
-        # 等待 Service 回應, 最多等 5 秒
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-
-        if future.result() is not None:
-            return True
-        else:
-            return False
+        return future.result() is not None
 
     def takeoff(self):
-        """發送起飛指令. """
         self.takeoff_pub.publish(Empty())
 
-
-# ================================================================
-# Part 2: Gym 環境
-# 標準 Gymnasium 介面, PPO/SAC 等演算法都能直接使用
-# ================================================================
 class DroneGymEnv(gym.Env):
-    """
-    Task B: 隨機目標導航環境. 
-
-    每個 Episode 的流程: 
-        1. 呼叫 /reset_world Service -> 無人機傳送回原點(硬重置). 
-        2. 等待物理引擎穩定 -> 確認無人機確實在原點. 
-        3. 發送 /takeoff -> 無人機起飛. 
-        4. 等待無人機達到穩定懸停高度. 
-        5. 隨機生成目標點. 
-        6. Agent 輸出速度指令, 嘗試飛到目標點. 
-        7. 到達 or 超時 or 飛出邊界 -> Episode 結束. 
-
-    MDP 定義: 
-        State  (13維): [pos_x, pos_y, pos_z, target_x, target_y, target_z, rel_x, rel_y, rel_z, vel_x, vel_y, vel_z, dist]
-        Action (3維): [vx, vy, vz], 範圍 [-MAX_SPEED, MAX_SPEED]
-        Reward: 見 _compute_reward() 
-        Gamma : 0.99(依據 Paper 2 Table 1 及 Paper 3 Table 1) 
-    """
-
-    # 最大速度: 1.5 m/s, 與 Paper 2 NormalizedV 範圍 [-1, 1] 相符. 
-    # 測試 1.0
     MAX_SPEED = 1.0
-
-    # 到達距離閾值 0.4m: 依據 Paper 3 Section 4.2.1, 
-    # "when the distance value is less than 40 cm, grant a reward of +100. "
-    ARRIVE_DIST = 1.0
-    # ARRIVE_DIST = 0.85
-    # ARRIVE_DIST = 0.75
-
-    # 每個 Episode 最多步數 200 步(20 秒): 
-    # Paper 2 Section IV 使用 1000 timesteps per episode(40ms/step = 40s). 
-    # 本環境每步 0.1 秒, 200 步 = 20 秒, 足夠完成短距離目標導航. 
-    MAX_STEPS = 400
-
-    # 邊界: x/y 最大 15m, z 最大 8m. 
-    # 放寬至 15m 以避免訓練初期因探索而頻繁出界. 
-    # 測試: 3, 5m
+    ARRIVE_DIST = 1.0  
+    MAX_STEPS = 600
     BOUNDARY_XY    = 3.0
     BOUNDARY_Z_MAX = 5.0
-
-    # 地板邊界設為 -1.0(實際不會觸發): 
-    # /reset_world 後無人機在地面, 需等待起飛才開始計算 reward, 
-    # 設為負值避免起飛過渡期誤判出界. 
     BOUNDARY_Z_MIN = 0.0
 
-    # 目標點隨機範圍: 依據 Paper 3 Section 4.2 的場景設計, 
-    # 目標在 x/y [-5, 5], z [1, 3] 的安全空間內隨機生成. 
-    # 修改: 把原本的 +-5.0 改小, 原本的太大很難在 300000 內收斂
-    TARGET_LOW  = np.array([-0.5, -0.5, 1.0], dtype=np.float32)
-    TARGET_HIGH = np.array([ 0.5,  0.5, 3.0], dtype=np.float32)      
-
-    # 等待起飛的最小安全高度: 確認無人機已真正離地才開始 Episode. 
+    CURRICULUM_LEVELS = {
+        1: {
+            'target_low':    np.array([-1.0, -1.0, 1.5], dtype=np.float32),
+            'target_high':   np.array([ 1.0,  1.0, 2.5], dtype=np.float32),
+            'boundary_xy':   3.0,
+            'arrive_dist':   1.5,
+            'hover_steps':   3,     
+            'hover_max_spd': 0.8,
+        },
+        2: {
+            'target_low':    np.array([-1.75, -1.75, 1.5], dtype=np.float32),
+            'target_high':   np.array([ 1.75,  1.75, 2.75], dtype=np.float32),
+            'boundary_xy':   3.5,
+            'arrive_dist':   1.35,
+            'hover_steps':   3,     # 從 5 放寬，預期成功步數 9（跟 L1 一樣）
+            'hover_max_spd': 0.75,  # 從 0.65 放寬
+        },
+        3: {
+            'target_low':    np.array([-2.5, -2.5, 1.5], dtype=np.float32),
+            'target_high':   np.array([ 2.5,  2.5, 3.0], dtype=np.float32),
+            'boundary_xy':   4.0,
+            'arrive_dist':   1.2,
+            'hover_steps':   5,     # 從 8 放寬，預期成功步數 30
+            'hover_max_spd': 0.60,  # 從 0.50 放寬
+        },
+        4: {
+            'target_low':    np.array([-3.25, -3.25, 1.5], dtype=np.float32),
+            'target_high':   np.array([ 3.25,  3.25, 3.25], dtype=np.float32),
+            'boundary_xy':   4.5,
+            'arrive_dist':   1.1,
+            'hover_steps':   8,     # 從 11 放寬，預期成功步數 139
+            'hover_max_spd': 0.45,  # 從 0.40 放寬
+        },
+        5: {
+            'target_low':    np.array([-4.0, -4.0, 1.5], dtype=np.float32),
+            'target_high':   np.array([ 4.0,  4.0, 3.5], dtype=np.float32),
+            'boundary_xy':   5.0,
+            'arrive_dist':   1.0,
+            'hover_steps':   12,    # 從 15 放寬，預期成功步數 867
+            'hover_max_spd': 0.35,  # 從 0.30 放寬
+        },
+    }
+    MAX_CURRICULUM_LEVEL = 5
+    TARGET_LOW  = CURRICULUM_LEVELS[1]['target_low']
+    TARGET_HIGH = CURRICULUM_LEVELS[1]['target_high']
     MIN_HOVER_Z = 0.8
 
     def __init__(self, ros_interface: DroneROSInterface):
         super().__init__()
         self.ros = ros_interface
 
-        # Action: [vx, vy, vz]
         self.action_space = spaces.Box(
             low  = -self.MAX_SPEED,
             high =  self.MAX_SPEED,
@@ -226,133 +140,150 @@ class DroneGymEnv(gym.Env):
             dtype=np.float32
         )
 
-        # Observation: [pos, target, rel_pos, vel, dist] 共 13 維. 
-        # 狀態設計依據 Paper 2 Section IV: 
-        # agent 同時感知自身位置、目標位置與當前速度, 
-        # 加入相對位置與距離, 大幅降低神經網路的學習難度
-        obs_limit = np.array(
-            [5, 5, 5,   # 無人機位置
-             5, 5, 5,   # 目標位置
-             10, 10, 10,   # 相對位置
-             2,  2,  2,    # 速度
-             15],          # 絕對距離
-            dtype=np.float32
-        )
         self.observation_space = spaces.Box(
-            low  = -obs_limit,
-            high =  obs_limit,
-            shape=(13,),
+            low  = -5.0,
+            high =  5.0,
+            shape=(6,),
             dtype=np.float32
         )
 
-        # 內部狀態
-        self.target     = np.zeros(3, dtype=np.float32)
-        self.step_count = 0
-        self.prev_dist  = None
+        self.HOVER_STEPS     = 3
+        self.HOVER_MAX_SPEED = 0.8
+        self.ARRIVE_DIST     = 1.5
 
-        # 新增: 用來記錄每回合各項獎勵的累計值
+        self.curriculum_level = 1
+        self._apply_curriculum(1)
+
+        self.target        = np.zeros(3, dtype=np.float32)
+        self.step_count    = 0
+        self.prev_dist     = None
+        self.hover_steps   = 0       
+
         self.ep_components = {
-            'progress': 0.0, 'arrive': 0.0, 'boundary_s': 0.0,
-            'time': 0.0, 'boundary': 0.0, 'proximity': 0.0, 'attitude': 0.0, 'soft_boundary': 0.0
+            'progress': 0.0, 'arrive': 0.0, 'action': 0.0,
+            'time': 0.0, 'boundary': 0.0, 'proximity': 0.0, 'decel': 0.0
         }
 
+    def _apply_curriculum(self, level: int):
+        cfg = self.CURRICULUM_LEVELS[level]
+        self.TARGET_LOW      = cfg['target_low'].copy()
+        self.TARGET_HIGH     = cfg['target_high'].copy()
+        self.BOUNDARY_XY     = cfg['boundary_xy']
+        self.ARRIVE_DIST     = cfg['arrive_dist']
+        self.HOVER_STEPS     = cfg['hover_steps']
+        self.HOVER_MAX_SPEED = cfg['hover_max_spd']
+
+    def set_curriculum_level(self, level: int):
+        level = int(np.clip(level, 1, self.MAX_CURRICULUM_LEVEL))
+        if level != self.curriculum_level:
+            self.curriculum_level = level
+            self._apply_curriculum(level)
+            self.ros.get_logger().info(
+                f'[Curriculum] Level -> {level} | '
+                f'Target x/y: ±{self.TARGET_HIGH[0]:.1f}m, '
+                f'z: {self.TARGET_LOW[2]:.1f}~{self.TARGET_HIGH[2]:.1f}m | '
+                f'ARRIVE: {self.ARRIVE_DIST:.1f}m, '
+                f'HOVER: {self.HOVER_STEPS}steps @ <{self.HOVER_MAX_SPEED:.1f}m/s'
+            )
+
     def _get_tilt_angle(self) -> float:
-        """計算機身 Z 軸與世界 Z 軸的夾角 (弧度)"""
         x, y, z, w = self.ros.current_quat
         z_z = 1.0 - 2.0 * (x**2 + y**2)
         z_z = np.clip(z_z, -1.0, 1.0)
         return float(np.arccos(z_z))
 
     def reset(self, seed=None, options=None):
-        """
-        Episode 重置流程: 
-            Step 1: 呼叫 /reset_world Service -> 無人機傳送回原點(硬重置). 
-            Step 2: 等待物理引擎穩定. 
-            Step 3: 發送 /takeoff -> 無人機起飛. 
-            Step 4: 等待無人機達到 MIN_HOVER_Z 高度(最多等 10 秒). 
-            Step 5: 隨機生成目標點. 
-        """
         super().reset(seed=seed)
         self.step_count = 0
 
-        # --- Step 1: 硬重置 ---
-        # 呼叫 /reset_world Service, 強制 Gazebo 將無人機傳送回初始 Spawn Pose. 
-        # 這是唯一能真正改變物理位置的方式, /simple_drone/reset Topic 只能
-        # 清除控制器狀態, 無法移動無人機. 
+        # --- Step 1: 第一次 Land，確保當前飛行狀態被打斷 ---
+        self.ros.send_velocity(0.0, 0.0, 0.0)
+        self.ros.land_pub.publish(Empty())
+        time.sleep(0.5)
+
+        # --- Step 2: 硬重置物理世界 ---
         self.ros.reset_world()
-        # 2. 控制器重置：清空 PID 積分誤差，防止上回合的推力殘留
+
+        # --- Step 3: 第二次 Land，確保 navi_state 確實轉為 LANDED_MODEL ---
+        self.ros.land_pub.publish(Empty())
+        time.sleep(1.5)
+
+        # --- Step 4: 起飛 ---
+        for attempt in range(5):
+            self.ros.takeoff_pub.publish(Empty())
+            start_ns = self.ros.get_clock().now().nanoseconds
+            while (self.ros.get_clock().now().nanoseconds - start_ns) < 5e8:
+                rclpy.spin_once(self.ros, timeout_sec=0.01)
+            if self.ros.current_pose[2] > 0.2:
+                break
+
+        # --- Step 5: 開啟速度控制模式 ---
+        vel_mode_msg = Bool()
+        vel_mode_msg.data = True
+        self.ros.vel_mode_pub.publish(vel_mode_msg)
         self.ros.soft_reset_pub.publish(Empty())
 
-        self.ros.send_velocity(0.0, 0.0, 0.0)
-        # --- Step 2: 等待物理引擎穩定 ---
-        # reset_world 後 Gazebo 需要幾個 tick 才能完成世界重置, 
-        # 在此期間持續 spin 更新感測器資料. 
-        for _ in range(20):
-            rclpy.spin_once(self.ros, timeout_sec=0.1)
+        stable_start = time.time()
+        while rclpy.ok():
+            rclpy.spin_once(self.ros, timeout_sec=0.01)
+            pos = self.ros.current_pose
+            if abs(pos[0]) < 0.5 and abs(pos[1]) < 0.5 and pos[2] > 0.4:
+                break
+            if time.time() - stable_start > 3.0:
+                self.ros.get_logger().warn('[WARN] Reset stabilization timeout!')
+                break
+        self.ros.soft_reset_pub.publish(Empty())
+        time.sleep(0.3)
 
-        # --- Step 3: 發送起飛指令 ---
-        self.ros.takeoff()
-
-        # --- Step 4: 等待起飛穩定 (起飛保護) ---
-        # 不只要等高度夠，還要強制它把速度降下來，平穩懸停後才開始訓練
-        for _ in range(100):
-            # 強制發送 0 速度，壓制起飛時的側向滑行
+        for _ in range(10):
+            rclpy.spin_once(self.ros, timeout_sec=0.02)
+            vel_norm = float(np.linalg.norm(self.ros.current_vel))
+            if vel_norm < 0.5 and self.ros.current_pose[2] > 0.4:
+                break
             self.ros.send_velocity(0.0, 0.0, 0.0)
-            rclpy.spin_once(self.ros, timeout_sec=0.1)
-            
-            if self.ros.current_pose[2] > self.MIN_HOVER_Z:
-                # 確保速度向量小於 0.2 m/s 才算穩定懸停
-                vel_norm = float(np.linalg.norm(self.ros.current_vel))
-                if vel_norm < 0.2:
-                    break
+            self.ros.soft_reset_pub.publish(Empty())
 
-        # --- Step 5: 隨機生成目標點 ---
         self.target = self.np_random.uniform(
             low=self.TARGET_LOW, high=self.TARGET_HIGH
         ).astype(np.float32)
 
+        self.ros.send_velocity(0.0, 0.0, 0.0)
         rclpy.spin_once(self.ros, timeout_sec=0.1)
 
-        # 計算初始距離, nan 時給預設值
         self.prev_dist = float(np.linalg.norm(self.ros.current_pose - self.target))
-        # print(f"[Reset] Initial dist: {self.prev_dist:.3f}m")
         if np.isnan(self.prev_dist):
             self.prev_dist = 5.0
-
-        # 新增: 回合重置時, 清空各項獎勵的累計值
+        
+        self.initial_dist = self.prev_dist
+        self.hover_steps = 0
         for key in self.ep_components.keys():
             self.ep_components[key] = 0.0
 
+        # print(f"[Debug] Dist: {self.prev_dist:.2f}")
         return self._get_obs(), {}
 
     def step(self, action):
-        """每步執行動作並回傳新狀態. """
-        # 1. 把 action clip 到安全範圍
         action = np.clip(action, -self.MAX_SPEED, self.MAX_SPEED)
         real_velocity = action * 0.8
 
-        # 2. 發指令給無人機, 等模擬器更新
-        self.ros.send_velocity(*real_velocity)
-        rclpy.spin_once(self.ros, timeout_sec=0.1)
+        # 在 0.1 秒內持續送速度指令，確保插件確實收到
+        start_ns = self.ros.get_clock().now().nanoseconds
+        while (self.ros.get_clock().now().nanoseconds - start_ns) < 1e8:
+            self.ros.send_velocity(*real_velocity)
+            rclpy.spin_once(self.ros, timeout_sec=0.01)
         self.step_count += 1
 
-        # 3. 讀取新狀態
         obs = self._get_obs()
         pos = self.ros.current_pose.copy()
 
-        # 4. 計算 reward 並更新細項
         reward, terminated = self._compute_reward(action, pos)
-
-        # 5. 超時終止
         truncated = (self.step_count >= self.MAX_STEPS)
 
-        # 超時懲罰: 時間到了卻沒抵達，沒收基本獎勵
         if truncated and not terminated:
             r_timeout = -50.0  
             reward += r_timeout
             self.ep_components['time'] += r_timeout
 
-        # 新增: 如果回合結束, 把這回合的細項打包進 info 傳出去
         info = {}
         if terminated or truncated:
             info['ep_components'] = self.ep_components.copy()
@@ -360,74 +291,35 @@ class DroneGymEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def _compute_reward(self, action: np.ndarray, pos: np.ndarray):
-        """
-        獎勵函數, 由五項組成: 
-
-        1. 距離縮短獎勵(r_progress): 
-           依據 Paper 3(Shen & Huang, 2024) Section 4.2.1: 
-           "d = Dabs_before - Dabs, the environment uses d as the basis for reward. "
-           係數 10.0: 依據 Paper 1(Tan & Karakose, 2023) 實驗, 
-           更強的距離訊號有助於加速初期收斂, 防止 agent 陷入局部最優. 
-
-        2. 到達獎勵(r_arrive): 
-           依據 Paper 3 Section 4.2.1: "grant a reward of +100. "
-           閾值 0.4m 來自 Paper 3 的 40cm 判定標準. 
-
-        3. 時間懲罰(r_time): 
-           依據 Paper 3 Section 4.2.1 的 time deduction item. 
-           固定值參考 Paper 2(AirPilot) Section IV 的 episode 終止設計, 
-           有效防止 agent 在原地磨蹭. 
-
-        4. 邊界懲罰(r_boundary): 
-           依據 Paper 3 Section 4.2.1: 碰撞懲罰 -100. 
-           本實作使用 -50 作為邊界懲罰(出界但尚未實際碰撞). 
-        """
         terminated = False
         curr_dist  = float(np.linalg.norm(pos - self.target))
         if np.isnan(curr_dist):
             curr_dist = 10.0
+            
+        curr_speed = float(np.linalg.norm(self.ros.current_vel))
 
-        # --- 1. 時間流逝懲罰 (Paper 3: Time deduction item) ---
-        # 移除生存底薪，改為每步固定的微小懲罰，逼迫快速完工
-        r_time = -0.1 
-
-        # --- 2. 距離縮短獎勵: 只獎勵靠近，杜絕來回套利 ---
+        r_time = -0.2 
         delta = self.prev_dist - curr_dist
-        # r_progress = 8.0 * max(0.0, delta)
-        r_progress = 8.0 * max(0.0, delta) - 3.0 * max(0.0, -delta)
+        r_progress = 40.0 * delta
         self.prev_dist = curr_dist
 
-        # 3. 近距離獎勵：加上限，修正邊界不連續
         r_proximity = 0.0
-        if self.ARRIVE_DIST > 0 and curr_dist < self.ARRIVE_DIST * 3.0:
-            # 在觸發邊界處平滑接入（乘以線性開關）
-            gate = 1.0 - curr_dist / (self.ARRIVE_DIST * 3.0)
-            raw = 1.0 * np.exp(3.0 * (1.0 - curr_dist / self.ARRIVE_DIST))
-            r_proximity = min(raw, 8.0) * gate
-
-        # # 4. 姿態連續懲罰（新增）：不再等到 45° 才終止
-        # tilt_angle = self._get_tilt_angle()
-        # r_attitude = -1.0 * (tilt_angle / (np.pi / 4.0)) ** 2   # 0°→0, 45°→-1
-
-
-        # MARGIN = 0.3
-        # excess_x = max(0.0, abs(pos[0]) - (self.BOUNDARY_XY - MARGIN))
-        # excess_y = max(0.0, abs(pos[1]) - (self.BOUNDARY_XY - MARGIN))
-        # excess_z = max(0.0, pos[2] - (self.BOUNDARY_Z_MAX - MARGIN))
-        # r_soft_boundary = -0.8 * (excess_x + excess_y + excess_z) / MARGIN
-
-        # # 在軟邊界區域內，速度越快懲罰越重
-        # speed = float(np.linalg.norm(self.ros.current_vel))
-        # boundary_proximity = max(
-        #     max(0.0, abs(pos[0]) - (self.BOUNDARY_XY - 0.8)),
-        #     max(0.0, abs(pos[1]) - (self.BOUNDARY_XY - 0.8))
-        # ) / 0.8  # 0~1
-
-        # r_boundary_speed = -0.8 * boundary_proximity * speed
-        
-        # 5. 終止條件（修正優先級）
+        r_decel = 0.0
+        r_action = 0.0
         r_boundary = 0.0
         r_arrive   = 0.0
+
+        r_action = -0.01 * float(np.sum(np.square(action)))
+
+        # 減速帶：固定為 arrive_dist * 2.0 的環形區域
+        # 只在 arrive_dist <= curr_dist < decel_zone 生效（arrive 區內由 proximity 負責）
+        # 只懲罰超過 hover_max_spd * 1.2 的部分，給低速飛行留空間
+        decel_zone = self.ARRIVE_DIST * 2.0
+        speed_thresh = self.HOVER_MAX_SPEED * 1.2
+        if self.ARRIVE_DIST <= curr_dist < decel_zone:
+            excess_speed = max(0.0, curr_speed - speed_thresh)
+            proximity_ratio = (decel_zone - curr_dist) / decel_zone
+            r_decel = -5.0 * excess_speed * proximity_ratio
 
         tilt_angle    = self._get_tilt_angle()
         is_crashed    = tilt_angle > (np.pi / 3.0)
@@ -438,66 +330,61 @@ class DroneGymEnv(gym.Env):
             pos[2] < self.BOUNDARY_Z_MIN
         )
 
-        if out_of_bounds or is_crashed:          # ← 優先判斷失敗
+        if out_of_bounds or is_crashed:
             r_boundary = -100.0
             terminated = True
-        elif curr_dist < self.ARRIVE_DIST:            # ← 安全到達才給獎勵
-            # speed = np.linalg.norm(self.ros.current_vel)
-            # r_arrive = 100.0 - 10.0 * min(speed, self.MAX_SPEED)  # 速度越慢獎勵越高
-            r_arrive = 100.0
-            terminated = True
+            self.hover_steps = 0
+        else:
+            if curr_dist < self.ARRIVE_DIST:
+                if curr_speed < self.HOVER_MAX_SPEED:
+                    self.hover_steps += 1
+                    hover_bonus = 5.0 * self.hover_steps
+                    r_proximity = hover_bonus + 10.0 * (self.ARRIVE_DIST - curr_dist) - 8.0 * curr_speed
+                    
+                    if self.hover_steps >= self.HOVER_STEPS:
+                        r_arrive = 200.0
+                        terminated = True
+                else:
+                    self.hover_steps = 0
+                    r_proximity = -8.0 * curr_speed
+            else:
+                self.hover_steps = 0
 
-        r_attitude = 0
-        r_boundary_speed = 0
-        r_soft_boundary = 0
-
-        # 更新記錄器
         self.ep_components['time']      += r_time
         self.ep_components['progress']  += r_progress
         self.ep_components['proximity'] += r_proximity
-        self.ep_components['attitude']  += r_attitude
+        self.ep_components['action']    += r_action
+        self.ep_components['decel']     += r_decel 
         self.ep_components['arrive']    += r_arrive
         self.ep_components['boundary']  += r_boundary
-        self.ep_components['boundary_s']  += r_boundary_speed
-        self.ep_components['soft_boundary'] += r_soft_boundary
 
-        reward = r_time + r_progress + r_proximity + r_attitude + r_soft_boundary + r_boundary + r_arrive + r_boundary_speed
+        reward = r_time + r_progress + r_proximity + r_action + r_decel + r_boundary + r_arrive
         return reward, terminated
 
     def _get_obs(self) -> np.ndarray:
-        """
-        回傳 13 維觀測向量: 
-        [pos_x, pos_y, pos_z, target_x, target_y, target_z, 
-         rel_x, rel_y, rel_z, vel_x, vel_y, vel_z, distance]
-
-        狀態設計依據 Paper 2(AirPilot) Section IV: 
-        agent 同時感知自身絕對位置、目標位置與當前速度. 
-        速度資訊對應 Paper 2 中的 dPE/dt(位置誤差微分), 有助於 agent 判斷動量方向. 
-        加入相對位置與距離, 讓網路具備方向感. 
-        """
-        pos = self.ros.current_pose
-        vel = self.ros.current_vel
+        pos    = self.ros.current_pose
+        vel    = self.ros.current_vel
         target = self.target
-        
-        rel_pos = target - pos
-        dist = float(np.linalg.norm(rel_pos))
+        yaw    = self.ros.current_yaw
 
-        obs = np.concatenate([
-            pos,
-            target,
-            rel_pos,
-            vel,
-            [dist]
-        ]).astype(np.float32)
+        dx_w = float(target[0] - pos[0])
+        dy_w = float(target[1] - pos[1])
+        dz_w = float(target[2] - pos[2])
 
-        # nan_to_num 防止感測器資料異常造成神經網路崩潰
-        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
-        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
+        dx_b =  dx_w * np.cos(yaw) + dy_w * np.sin(yaw)
+        dy_b = -dx_w * np.sin(yaw) + dy_w * np.cos(yaw)
 
-        # 將觀測值除以最大邊界，正規化到 [-1, 1] 的範圍
-        obs = obs / self.observation_space.high
+        # 動態正規化
+        scale_xy = self.BOUNDARY_XY
+        scale_z  = self.TARGET_HIGH[2]
+        rel_pos_scaled = np.array([dx_b / scale_xy, dy_b / scale_xy, dz_w / scale_z], dtype=np.float32)
+        vels_scaled    = (vel / self.MAX_SPEED).astype(np.float32)
+
+        obs = np.concatenate([rel_pos_scaled, vels_scaled])
+        obs = np.nan_to_num(obs, nan=0.0, posinf=5.0, neginf=-5.0)
+        obs = np.clip(obs, -2.0, 2.0)
+
         return obs
 
     def get_logger(self):
-        """讓 DroneGymEnv 也能使用 ROS logger. """
         return self.ros.get_logger()
