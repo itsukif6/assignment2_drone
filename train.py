@@ -74,7 +74,7 @@ class CurriculumCallback(BaseCallback):
     EVAL_EPISODES     = 30     
 
     FINAL_THRESHOLD   = 0.80   
-    FINAL_CHECKS      = 2      
+    FINAL_CHECKS      = 3      
 
     def __init__(self, save_dir='logs', model_save_path='best_model', verbose=0):
         super().__init__(verbose)
@@ -308,19 +308,19 @@ def main():
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
     print('Pose data received. Starting training.')
 
-    MODEL_PATH = 'model_level1'
+    MODEL_PATH = 'model_level2'
 
     if os.path.exists(MODEL_PATH + '.zip'):
         print(f'Model found: {MODEL_PATH}.zip, continue training...')
         model = PPO.load(
             MODEL_PATH,
             env=env,
-            custom_objects={
-                'learning_rate': 1e-4,
-                'batch_size': 128,
-                'ent_coef': 0.001,
-                'n_steps': 1024,
-            }
+            # custom_objects={
+            #     'learning_rate': 3e-4,
+            #     'batch_size': 64,
+            #     'ent_coef': 0.01,
+            #     'n_steps': 2048,
+            # }
         )
         callback = CurriculumCallback(
             save_dir='logs',
