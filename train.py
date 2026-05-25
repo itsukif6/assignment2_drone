@@ -5,6 +5,32 @@ train.py
 基於 PPO 演算法的無人機導航訓練腳本。
 實作課程學習 (Curriculum Learning) 機制，支援自動難度提升與動態存檔。
 支援參數化指定起始等級，且同步存檔至 logs/ 與 models/ 資料夾。
+
+[Reference 1] 
+Tan, Z., & Karaköse, M. (2023). "A new approach for drone tracking with drone 
+using Proximal Policy Optimization based distributed deep reinforcement learning." 
+SoftwareX.
+- 應用部分：神經網路架構設計 (Policy Network Architecture)。
+- 具體實作：採用 [256, 256] 之隱藏層大小，並搭配 Tanh 啟動函數，以適應三維空間之連續控制。
+
+[Reference 2] 
+Zhang, J., Nguyen, S., Rivera, C. E. O., & Tyni, K. "AirPilot: Interpretable 
+PPO-based DRL Auto-Tuned Nonlinear PID Drone Controller for Robust Autonomous Flights."
+- 應用部分：觀測空間 (Observation Space)、懸停判定 (Hovering/Settling) 與超時中止條件。
+- 具體實作：
+  1. 狀態輸入採用相對位置誤差 (Position Error) 與速度 (Velocity)。
+  2. 導入「減速帶機制」與「穩定懸停步數 (HOVER_STEPS)」，以減少超調量 (Overshoot)。
+  3. 設定最大步數強制終止與嚴重機身傾角懲罰，以鼓勵能源效率並避免危險飛行。
+
+[Reference 3] 
+Shen, S.-E., & Huang, Y.-C. (2024). "Application of Reinforcement Learning 
+in Controlling Quadrotor UAV Flight Actions." Drones.
+- 應用部分：PPO 模型超參數、連續回合方法 (Continuous Round Method, CRM) 之獎勵機制。
+- 具體實作：
+  1. 採用文獻測試驗證之最佳 PPO 參數：learning_rate=3e-4, n_steps=2048, 
+     batch_size=64, gamma=0.99, gae_lambda=0.95, vf_coef=0.5。
+  2. 獎勵機制設計：導入與目標中心之距離差值 (+d) 作為進度獎勵、
+     每步微小時間耗損懲罰 (-Tm)，以及碰撞邊界/障礙物之極端懲罰 (-100)。
 """
 
 import os
@@ -82,7 +108,7 @@ class CurriculumCallback(BaseCallback):
     EVAL_INTERVAL     = 50     # 每經過多少訓練回合進行一次確定性評估
     EVAL_EPISODES     = 30     # 每次評估執行的測試回合數
 
-    FINAL_THRESHOLD   = 0.80   # 最高層級(Level 13)的通關結訓門檻
+    FINAL_THRESHOLD   = 0.80   # 最高層級(Level 7)的通關結訓門檻
     FINAL_CHECKS      = 1      # 最高層級連續達到門檻的次數要求
 
     def __init__(self, save_dir='logs', models_dir='models', model_save_path='best_model', verbose=0):
@@ -120,7 +146,7 @@ class CurriculumCallback(BaseCallback):
                         if len(row) >= 2:
                             self.episode_rewards.append(float(row[1]))
             except Exception as e:
-                print(f'[Error] 讀取歷史數據失敗: {e}')
+                print(f'[Error] Load history data failed: {e}')
         self._new_episodes_start_idx = len(self.episode_rewards)
         self._level_start_idx = len(self.episode_rewards)
 
@@ -184,7 +210,7 @@ class CurriculumCallback(BaseCallback):
                     if self.current_level < DroneGymEnv.MAX_CURRICULUM_LEVEL:
                         self._promote(ep)
                     else:
-                        print(f'\n[Auto-Stop] Level {self.current_level} 已滿足最終結訓門檻。訓練結束。')
+                        print(f'\n[Auto-Stop] Level {self.current_level} had reach the promote. Train stop.')
                         _save_level_snapshot(self.save_dir, self.models_dir, self.current_level, self.episode_rewards, self._level_start_idx, ep, self.model)
                         self.should_stop_training = True
             else:
@@ -277,7 +303,7 @@ class CurriculumCallback(BaseCallback):
 
         ax.set_xlabel('Episode', fontsize=12)
         ax.set_ylabel('Total Reward', fontsize=12)
-        ax.set_title('PPO Training Curve - Curriculum Learning (Level 1 to 13)', fontsize=13)
+        ax.set_title('PPO Training Curve - Curriculum Learning (Level 1 to 7)', fontsize=13)
         ax.legend()
         ax.grid(True, alpha=0.3)
         png_path = os.path.join(self.save_dir, 'training_curve.png')
@@ -288,12 +314,12 @@ class CurriculumCallback(BaseCallback):
 
 def main():
     parser = argparse.ArgumentParser(description="訓練無人機 PPO 模型 (支援課程學習)")
-    parser.add_argument('--level', type=int, default=1, help='指定起始的課程等級 (1~13)')
+    parser.add_argument('--level', type=int, default=1, help='指定起始的課程等級 (1~7)')
     args = parser.parse_args()
     start_level = args.level
 
     print('=' * 60)
-    print(f'  PPO 訓練任務啟動  (起始等級: Level {start_level})')
+    print(f'  PPO train start (From level: {start_level})')
     print('=' * 60)
 
     rclpy.init()
@@ -321,17 +347,24 @@ def main():
             policy          = 'MlpPolicy',
             env             = env,
             verbose         = 1,
-            learning_rate   = 3e-4,  #
-            n_steps         = 2048,  #
-            batch_size      = 64,    #
+
+            # [參考: Shen 等人 (2024) 論文] PPO 訓練參數表 (Table 1)
+            # 這些超參數與 Shen 論文中 PPO 最佳化參數完全一致：
+            learning_rate   = 3e-4,  # 對應 Shen 論文的 0.0003 (AirPilot 也使用 3e-4)
+            n_steps         = 2048,  # 對應 Shen 論文的 N steps = 2048
+            batch_size      = 64,    # 對應 Shen 論文的 Batch Size = 64 (AirPilot 也使用 64)
+            gamma           = 0.99,  # 對應 Shen 論文的 Gamma = 0.99 (AirPilot 也是 0.99)
+            gae_lambda      = 0.95,  # 對應 Shen 論文的 GAE Lambda = 0.95
+            vf_coef         = 0.5,   # 對應 Shen 論文的 VF Coefficient = 0.5
+            
             n_epochs        = 10,
-            gamma           = 0.99,  #
-            gae_lambda      = 0.95,  #
             ent_coef        = 0.01,
-            vf_coef         = 0.5,   #
+
+            # [參考: Tan & Karaköse (2023) 論文] 分散式 PPO 無人機追蹤
+            # 架構設計參考了其處理三維狀態的設定 (Table 2)。
             policy_kwargs   = dict(
-                net_arch      = [256, 256], #
-                activation_fn = torch.nn.Tanh, #
+                net_arch      = [256, 256],    # 對應 Tan 論文的 Hidden layer = 256
+                activation_fn = torch.nn.Tanh, # 對應 Tan 論文的 Activation function = tanh
             ),
             tensorboard_log = './logs/tensorboard/',
         )
