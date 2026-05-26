@@ -93,12 +93,8 @@ class DroneROSInterface(Node):
     def send_velocity(self, vx: float, vy: float, vz: float):
         """封裝 Twist 訊息並發布速度指令"""
         msg = Twist()
-        msg.linear.x  = float(vx)
-        msg.linear.y  = float(vy)
-        msg.linear.z  = float(vz)
-        msg.angular.x = 0.0
-        msg.angular.y = 0.0
-        msg.angular.z = 0.0
+        msg.linear.x, msg.linear.y, msg.linear.z = float(vx), float(vy), float(vz)
+        msg.angular.x, msg.angular.y, msg.angular.z = 0.0, 0.0, 0.0
         self.cmd_vel_pub.publish(msg)
 
     def reset_world(self) -> bool:
@@ -149,10 +145,7 @@ class DroneGymEnv(gym.Env):
 
         # 動作空間：連續控制，表示無人機的三軸速度 (x, y, z)
         self.action_space = spaces.Box(
-            low  = -self.MAX_SPEED,
-            high =  self.MAX_SPEED,
-            shape=(3,),
-            dtype=np.float32
+            low=-self.MAX_SPEED, high=self.MAX_SPEED, shape=(3,), dtype=np.float32
         )
 
         # 狀態空間：包含正規化後的相對位置誤差與無人機當前速度
@@ -215,6 +208,13 @@ class DroneGymEnv(gym.Env):
         z_z = np.clip(z_z, -1.0, 1.0)
         return float(np.arccos(z_z))
 
+    def _get_yaw(self) -> float:
+        """從四元數提取 Yaw 角 (偏航角)"""
+        x, y, z, w = self.ros.current_quat
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        return float(np.arctan2(siny_cosp, cosy_cosp))
+
     def reset(self, seed=None, options=None):
         """
         重置環境：包含停止馬達、硬重置模擬器、重新起飛與姿態穩定。
@@ -224,6 +224,7 @@ class DroneGymEnv(gym.Env):
         # 初始化 Gymnasium 內部亂數種子與環境步數計數器
         super().reset(seed=seed)
         self.step_count = 0
+        self.success_steps = 0
 
         # ==========================================
         # 階段一：安全降落與物理環境重置

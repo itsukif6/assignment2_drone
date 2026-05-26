@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+test.py
+-------
+Load trained PPO model, run N episodes in Gazebo and calculate success rate.
+Includes P-controller baseline comparison.
+"""
+
 import argparse
 import numpy as np
 import rclpy
@@ -132,7 +139,6 @@ def main():
     ros.send_velocity(0, 0, 0)
     ros.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
