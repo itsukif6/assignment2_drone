@@ -385,20 +385,22 @@ class DroneGymEnv(gym.Env):
         
         # 計算絕對距離誤差
         curr_dist  = float(np.linalg.norm(pos - self.target))
-        if np.isnan(curr_dist):
-            curr_dist = 10.0
-            
+        if np.isnan(curr_dist): curr_dist = 10.0
         curr_speed = float(np.linalg.norm(self.ros.current_vel))
 
-        # 時間耗損懲罰 (Time Deduction)
         # [參考: Shen 等人 (2024) 論文] 每個 step 給予微小的時間耗損懲罰 (-Tm)，鼓勵快速完成。
         r_time = -0.2 
         
-        # 進度獎勵：用 initial_dist 正規化，讓各 level 的總進度上限一致（約 40）
+        # 進度獎勵 (Progress Reward)
         # [參考: Shen 等人 (2024) 論文] CRM 獎勵設計中的「與目標中心距離差值 (+d)」。
         # 如果無人機靠近目標 (delta > 0) 就給予正獎勵，遠離則給予負獎勵。
         delta = self.prev_dist - curr_dist
-        r_progress = 40.0 * delta / max(self.initial_dist, 1.0)
+        
+        # [修改] 修正 L1~L7 的距離稀釋問題 (數學死局修正)
+        # 移除分母 max(self.initial_dist, 1.0)，改為常數化獎勵。
+        # 設定權重為 25.0：當全速前進 (delta=0.1) 時，單步獲得 +2.5，
+        # 扣除時間與動作成本 (-0.21)，淨利潤為 +2.29。確保 L7 長距離也能維持強烈前進動機。
+        r_progress = 25.0 * delta
         self.prev_dist = curr_dist
 
         # 後面用到的參數初始化
@@ -408,9 +410,8 @@ class DroneGymEnv(gym.Env):
         r_boundary = 0.0
         r_arrive   = 0.0
 
-        # 動作懲罰 (Action Penalty)：計算動作向量的平方和 (Squared L2 Norm) 並給予負回饋權重 (-0.01)
-        # 目的：抑制神經網路輸出過大或劇烈震盪的控制指令，引導無人機學習平滑且節省推力 (節能) 的飛行策略
-        # [參考: AirPilot 論文] 參考其核心目標後衍生之實務工程技術：
+        # 動作懲罰 (Action Penalty) / 控制努力懲罰 (Control Effort Penalty)
+        # 學理與文獻支持 (基於 AirPilot 論文核心目標衍生之實務工程技術)：
         # 1. 控制平滑度與節能目標：
         #    - AirPilot 論文明確指出，無人機最佳化的目標包含了「能源效率 (energy 
         #      efficiency)」以及「平滑收斂 (smoother convergence)」。
@@ -425,7 +426,6 @@ class DroneGymEnv(gym.Env):
         #      從而降低將模擬環境中訓練出的策略部署至真實無人機時發生失控的風險。
         r_action = -0.01 * float(np.sum(np.square(action)))
 
-        # 減速帶機制：確保無人機在靠近目標時降低速度以符合懸停條件
         # [參考: AirPilot 論文] 鼓勵減少超調量 (overshoot) 與安定時間 (settling time)，
         # 這裡設計了減速帶機制，懲罰在靠近目標時速度過快的行為。
         decel_zone = self.ARRIVE_DIST * 2.0
@@ -433,7 +433,10 @@ class DroneGymEnv(gym.Env):
         if self.ARRIVE_DIST <= curr_dist < decel_zone:
             excess_speed = max(0.0, curr_speed - speed_thresh)
             proximity_ratio = (decel_zone - curr_dist) / decel_zone
-            r_decel = -10.0 * excess_speed * proximity_ratio
+            # [修改] 修正 L4 減速帶懲罰突波 (Deceleration Shock)
+            # 權重由 -10.0 調降至 -2.0。避免無人機在高速衝入減速區時瞬間吃下巨大負分
+            # 而產生「目標區恐懼症」，引導其願意溫和減速。
+            r_decel = -2.0 * excess_speed * proximity_ratio
 
         # 中止條件 2：墜機判定
         # [參考: AirPilot 論文] 對於無人機出現過大機身角度 (危險動作) 給予嚴厲懲罰並終止。
@@ -455,38 +458,47 @@ class DroneGymEnv(gym.Env):
             self.hover_steps = 0
         else:
             if curr_dist < self.ARRIVE_DIST:
+                # [修改] 重構懸停與超速的數學邏輯，消除「刷分漏洞」與「恐懼症」
                 if curr_speed < self.HOVER_MAX_SPEED:
                     self.hover_steps += 1
-                    # 穩定的每步獎勵：距離越近、速度越慢獎勵越高
-                    # 純 shape reward，無固定項，避免累積值超過 r_arrive
-                    # 每步上限 ~6，level7 最多累積 27×6=162 < r_arrive=200
-                    dist_ratio  = (self.ARRIVE_DIST - curr_dist) / self.ARRIVE_DIST  # 0~1
-                    speed_ratio = curr_speed / self.HOVER_MAX_SPEED                  # 0~1
-                    r_proximity = 6.0 * dist_ratio - 4.0 * speed_ratio
+                    dist_ratio  = (self.ARRIVE_DIST - curr_dist) / self.ARRIVE_DIST
+                    speed_ratio = curr_speed / self.HOVER_MAX_SPEED
+                    
+                    # 確保最差合法懸停狀態淨利潤大於 0
+                    # 加上 1.5 基礎值。最差邊緣狀態 (dist_ratio~0, speed_ratio~1) 時：
+                    # r_proximity = 1.5 + 0 - 1.0 = +0.5。淨利潤 = 0.5 - 0.21 = +0.29。
+                    # 防範無人機為了規避虧損而採取「靠近但不進入」的邊緣徘徊策略。
+                    r_proximity = 1.5 + 2.0 * dist_ratio - 1.0 * speed_ratio
                     
                     # 中止條件 4：成功抵達目標
                     # [參考: AirPilot 論文] 必須在目標區域內穩定停留指定的 timesteps (此處為 HOVER_STEPS)。
                     if self.hover_steps >= self.HOVER_STEPS:
-                        # 成功抵達/懸停目標獎勵
-                        # [參考: Shen 等人 (2024) 論文] 成功穿越目標 (Cross target)，給予單次大額獎勵 (+100，此處放大為 +200)。
+                        # [參考: Shen 等人 (2024) 論文] 成功穿越目標 (Cross target)，給予單次大額獎勵 (+200)。
                         r_arrive = 200.0
                         terminated = True
                 else:
                     self.hover_steps = 0
-                    r_proximity = -8.0 * curr_speed
+                    excess_speed = curr_speed - self.HOVER_MAX_SPEED
+                    
+                    # [修正]
+                    # 超速時，給予溫和的「摩擦力」懲罰 (-3.8 * excess)，而非致命打擊 (-8.0 * speed)。
+                    # 這保證了 r_proximity 是微小的負數，防範無人機在目標區內高速繞圈刷分 (Reward Hacking)。
+                    r_proximity = -3.8 * excess_speed
             else:
                 self.hover_steps = 0
 
-        self.ep_components['time']      += r_time
-        self.ep_components['progress']  += r_progress
-        self.ep_components['proximity'] += r_proximity
-        self.ep_components['action']    += r_action
-        self.ep_components['decel']     += r_decel 
-        self.ep_components['arrive']    += r_arrive
-        self.ep_components['boundary']  += r_boundary
+        # 將所有的 reward 加總，並更新 ep_components 供後續分析
+        total_reward = r_time + r_progress + r_proximity + r_decel + r_action + r_boundary + r_arrive
 
-        reward = r_time + r_progress + r_proximity + r_action + r_decel + r_boundary + r_arrive
-        return reward, terminated
+        self.ep_components['time']     += r_time
+        self.ep_components['progress'] += r_progress
+        self.ep_components['proximity']     += r_proximity
+        self.ep_components['decel']    += r_decel
+        self.ep_components['action']   += r_action
+        self.ep_components['boundary']    += r_boundary
+        self.ep_components['arrive']   += r_arrive
+
+        return total_reward, terminated
 
     def _get_obs(self) -> np.ndarray:
         """
