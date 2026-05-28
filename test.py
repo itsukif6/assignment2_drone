@@ -26,66 +26,62 @@ from drone_env import DroneROSInterface, DroneGymEnv
 # ================================================================
 # P 控制器 Baseline
 # ================================================================
-def run_baseline_episode(ros: DroneROSInterface,
-                          target: np.ndarray,
-                          arrive_dist: float,
-                          hover_steps_needed: int,
-                          hover_max_spd: float,
-                          initial_dist: float,
-                          max_steps: int = 600) -> dict:
+def run_baseline_episode(env: DroneGymEnv, max_steps: int = 600) -> dict:
     """
-    用 P 控制器飛一個 episode，使用與 RL 相同的 EffectiveSpeed 成功判定。
-    成功條件：dist < arrive_dist 且 speed < hover_max_spd，連續 hover_steps_needed 步。
-    hover_count 不因離圈而重置（對應 AirPilot EffectiveSpeed 概念）。
+    用 P 控制器飛一個 episode，但改為透過 env.step() 互動，
+    確保 Baseline 與 PPO 享有 100% 相同的 Reward 計算標準與成功判定。
     """
-    KP        = 0.5
-    MAX_SPEED = 1.0
-
-    total_reward  = 0.0
-    success       = False
-    hover_count   = 0
-    prev_dist     = float(np.linalg.norm(ros.current_pose - target))
+    KP = 0.5
+    
+    ep_reward = 0.0
+    ep_steps = 0
+    success = False
+    eff_speed = 0.0
 
     for step in range(max_steps):
-        pos   = ros.current_pose.copy()
+        # 取得當前真實座標與目標
+        pos = env.ros.current_pose
+        target = env.target
         error = target - pos
-        dist  = float(np.linalg.norm(error))
-        speed = float(np.linalg.norm(ros.current_vel))
+        
+        dist = float(np.linalg.norm(error))
+        speed = float(np.linalg.norm(env.ros.current_vel))
 
-        # P 控制速度
-        if dist < arrive_dist and speed < hover_max_spd:
-            vel         = np.zeros(3)
-            hover_count += 1
-            if hover_count >= hover_steps_needed:
-                success = True
-                break
+        # P 控制邏輯 (保留原本的硬編碼強制煞車策略)
+        if dist < env.ARRIVE_DIST and speed < env.HOVER_MAX_SPEED:
+            vel = np.zeros(3)
         else:
-            vel       = KP * error
-            vel_norm  = float(np.linalg.norm(vel))
-            if vel_norm > MAX_SPEED:
-                vel = vel * (MAX_SPEED / vel_norm)
+            vel = KP * error
+            vel_norm = float(np.linalg.norm(vel))
+            if vel_norm > env.MAX_SPEED:
+                vel = vel * (env.MAX_SPEED / vel_norm)
 
-        # 時間阻塞：與 RL 環境步長一致（0.1s）
-        start_ns = ros.get_clock().now().nanoseconds
-        while (ros.get_clock().now().nanoseconds - start_ns) < 1e8:
-            ros.send_velocity(*vel)
-            rclpy.spin_once(ros, timeout_sec=0.01)
+        # 動作轉換：環境中 real_velocity = action * 0.8，因此 action = vel / 0.8
+        action = vel / 0.8
+        
+        # 透過 Gym 環境步進，讓環境統一計算 Reward 與碰撞/超時判定
+        obs, reward, terminated, truncated, info = env.step(action)
+        
+        ep_reward += reward
+        ep_steps = step + 1
 
-        curr_dist     = float(np.linalg.norm(ros.current_pose - target))
-        total_reward += 5.0 * (prev_dist - curr_dist) - 0.1
-        prev_dist     = curr_dist
-
-    ros.send_velocity(0.0, 0.0, 0.0)
-    ep_steps        = step + 1
-    effective_speed = initial_dist / ep_steps if ep_steps > 0 else 0.0
+        if terminated:
+            # 判定是否成功完成 HOVER_STEPS 懸停
+            success = info.get('ep_components', {}).get('arrive', 0.0) > 0
+            eff_speed = info.get('effective_speed', 0.0)
+            break
+            
+        if truncated:
+            eff_speed = info.get('effective_speed', 0.0)
+            break
 
     return {
-        'success':         success,
-        'steps':           ep_steps,
-        'reward':          total_reward,
-        'effective_speed': effective_speed,
+        'success': success,
+        'steps': ep_steps,
+        'reward': ep_reward,
+        'effective_speed': eff_speed,
+        'init_dist': env.initial_dist,
     }
-
 
 # ================================================================
 # 主測試流程
@@ -146,11 +142,8 @@ def main():
 
         if mode == 'baseline':
             result    = run_baseline_episode(
-                ros, target,
-                arrive_dist        = env.ARRIVE_DIST,
-                hover_steps_needed = env.HOVER_STEPS,
-                hover_max_spd      = env.HOVER_MAX_SPEED,
-                initial_dist       = init_dist,
+                env,
+                max_steps = env.MAX_STEPS
             )
             success   = result['success']
             ep_steps  = result['steps']
@@ -207,8 +200,7 @@ def main():
     print(f'  Mean reward : {mean_reward:.2f}')
     print(f'  Mean steps  : {mean_steps:.1f}')
     print(f'  EffSpd (all)    : {mean_effspd:.4f} m/s')
-    print(f'  EffSpd (success): {mean_succ_es:.4f} m/s  '
-          f'← 主要品質指標 (越高越好)')
+    print(f'  EffSpd (success): {mean_succ_es:.4f} m/s')
     print('=' * 65)
 
     # ── 清理 ──────────────────────────────────────────────────────
