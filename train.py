@@ -4,33 +4,28 @@ train.py
 --------
 基於 PPO 演算法的無人機導航訓練腳本。
 實作課程學習 (Curriculum Learning) 機制，支援自動難度提升與動態存檔。
-支援參數化指定起始等級，且同步存檔至 logs/ 與 models/ 資料夾。
 
-[Reference 1] 
-Tan, Z., & Karaköse, M. (2023). "A new approach for drone tracking with drone 
-using Proximal Policy Optimization based distributed deep reinforcement learning." 
+[Reference 1]
+Tan, Z., & Karaköse, M. (2023). "A new approach for drone tracking with drone
+using Proximal Policy Optimization based distributed deep reinforcement learning."
 SoftwareX.
-- 應用部分：神經網路架構設計 (Policy Network Architecture)。
-- 具體實作：採用 [256, 256] 之隱藏層大小，並搭配 Tanh 啟動函數，以適應三維空間之連續控制。
+- 神經網路架構：[256, 256] 隱藏層，Tanh 啟動函數。
 
-[Reference 2] 
-Zhang, J., Nguyen, S., Rivera, C. E. O., & Tyni, K. "AirPilot: Interpretable 
+[Reference 2]
+Zhang, J., Nguyen, S., Rivera, C. E. O., & Tyni, K. "AirPilot: Interpretable
 PPO-based DRL Auto-Tuned Nonlinear PID Drone Controller for Robust Autonomous Flights."
-- 應用部分：觀測空間 (Observation Space)、懸停判定 (Hovering/Settling) 與超時中止條件。
-- 具體實作：
-  1. 狀態輸入採用相對位置誤差 (Position Error) 與速度 (Velocity)。
-  2. 導入「減速帶機制」與「穩定懸停步數 (HOVER_STEPS)」，以減少超調量 (Overshoot)。
-  3. 設定最大步數強制終止與嚴重機身傾角懲罰，以鼓勵能源效率並避免危險飛行。
+- EffectiveSpeed 成功判定：Distance / Timestep，連續懸停 HOVER_STEPS 步後升級。
+- 確定性評估 (deterministic=True) 衡量真實控制能力。
 
-[Reference 3] 
-Shen, S.-E., & Huang, Y.-C. (2024). "Application of Reinforcement Learning 
+[Reference 3]
+Shen, S.-E., & Huang, Y.-C. (2024). "Application of Reinforcement Learning
 in Controlling Quadrotor UAV Flight Actions." Drones.
-- 應用部分：PPO 模型超參數、連續回合方法 (Continuous Round Method, CRM) 之獎勵機制。
-- 具體實作：
-  1. 採用文獻測試驗證之最佳 PPO 參數：learning_rate=3e-4, n_steps=2048, 
-     batch_size=64, gamma=0.99, gae_lambda=0.95, vf_coef=0.5。
-  2. 獎勵機制設計：導入與目標中心之距離差值 (+d) 作為進度獎勵、
-     每步微小時間耗損懲罰 (-Tm)，以及碰撞邊界/障礙物之極端懲罰 (-100)。
+- PPO 超參數：learning_rate=3e-4, n_steps=2048, batch_size=64,
+              gamma=0.99, gae_lambda=0.95, vf_coef=0.5。
+
+使用方式：
+    python3 train.py             # 從 Level 1 開始訓練
+    python3 train.py --level 3   # 從 Level 3 繼續訓練
 """
 
 import os
@@ -49,38 +44,40 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from drone_env import DroneROSInterface, DroneGymEnv
 
+
+# ================================================================
+# 雙重 Logger：同步輸出至終端機與日誌檔
+# ================================================================
 class DualLogger:
-    """
-    將標準輸出 (stdout) 同步寫入終端機與日誌檔。
-    確保所有 print()、SB3 訓練進度與報錯都能被完整儲存下來。
-    """
+    """將 stdout 同步寫入終端機與日誌檔，確保訓練紀錄完整保存。"""
+
     def __init__(self, filepath):
         self.terminal = sys.stdout
-        self.log = open(filepath, "a", encoding="utf-8")
+        self.log      = open(filepath, 'a', encoding='utf-8')
 
     def write(self, message):
         self.terminal.write(message)
         self.log.write(message)
-        self.log.flush() # 確保即時寫入硬碟，避免程式崩潰時遺失
+        self.log.flush()
 
     def flush(self):
         self.terminal.flush()
         self.log.flush()
 
+
+# ================================================================
+# 快照儲存（升級 / 結束時呼叫）
+# ================================================================
 def _save_level_snapshot(save_dir: str, models_dir: str, level: int,
                           episode_rewards: list,
                           start_idx: int, end_idx: int,
                           model: PPO):
-    """
-    處理升級或訓練結束時的模型與數據快照儲存。
-    將紀錄儲存於對應的 level 資料夾，並同步模型權重至全域 models 資料夾。
-    """
+    """儲存當前 Level 的模型權重、CSV 數據與學習曲線圖。"""
     level_dir = os.path.join(save_dir, f'level{level}')
     os.makedirs(level_dir, exist_ok=True)
 
     level_rewards = episode_rewards[start_idx:end_idx]
     if level_rewards:
-        # 儲存該層級的歷史回報數據
         csv_path = os.path.join(level_dir, f'rewards_level{level}.csv')
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -88,74 +85,75 @@ def _save_level_snapshot(save_dir: str, models_dir: str, level: int,
             for i, r in enumerate(level_rewards):
                 writer.writerow([i + 1, start_idx + i + 1, r])
 
-        # 繪製並儲存該層級的學習曲線圖
-        window = min(20, len(level_rewards))
-        smoothed = []
-        for i in range(len(level_rewards)):
-            s = max(0, i - window + 1)
-            smoothed.append(np.mean(level_rewards[s:i + 1]))
+        window   = min(20, len(level_rewards))
+        smoothed = [np.mean(level_rewards[max(0, i - window + 1):i + 1])
+                    for i in range(len(level_rewards))]
 
-        episodes_x = list(range(1, len(level_rewards) + 1))
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(episodes_x, level_rewards, color='lightblue', alpha=0.5, label='Episode reward')
-        ax.plot(episodes_x, smoothed, color='steelblue', linewidth=2, label=f'Moving mean ({window} ep)')
+        ax.plot(range(1, len(level_rewards) + 1), level_rewards,
+                color='lightblue', alpha=0.5, label='Episode reward')
+        ax.plot(range(1, len(level_rewards) + 1), smoothed,
+                color='steelblue', linewidth=2, label=f'Moving mean ({window} ep)')
         ax.set_xlabel('Episode (in this level)', fontsize=12)
         ax.set_ylabel('Total Reward', fontsize=12)
         ax.set_title(f'PPO Training Curve - Level {level}', fontsize=13)
         ax.legend()
         ax.grid(True, alpha=0.3)
-        png_path = os.path.join(level_dir, f'training_curve_level{level}.png')
         plt.tight_layout()
-        plt.savefig(png_path, dpi=150)
+        plt.savefig(os.path.join(level_dir, f'training_curve_level{level}.png'), dpi=150)
         plt.close()
 
-    # 同步儲存模型權重至兩個路徑
-    model_path_log = os.path.join(level_dir, f'model_level{level}')
-    model.save(model_path_log)
-    
-    model_path_global = os.path.join(models_dir, f'model_level{level}')
-    model.save(model_path_global)
+    model.save(os.path.join(level_dir,   f'model_level{level}'))
+    model.save(os.path.join(models_dir,  f'model_level{level}'))
 
 
+# ================================================================
+# Curriculum Callback
+# ================================================================
 class CurriculumCallback(BaseCallback):
     """
-    自定義回調函數，負責監控訓練進度、執行定期評估，
-    並根據評估結果決定是否提升課程難度 (Level Up)。
+    監控訓練進度、執行定期確定性評估，
+    並根據 EffectiveSpeed 成功率自動提升課程難度。
+
+    升級判定：
+        每 EVAL_INTERVAL 個回合執行 EVAL_EPISODES 次確定性評估，
+        成功率 >= PROMOTE_THRESHOLD 即升一級；
+        Level 7 達到 FINAL_THRESHOLD 則結訓。
     """
-    PROMOTE_THRESHOLD = 0.65   # 觸發升級所需的評估成功率門檻 (65%)
-    PROMOTE_CHECKS    = 1      # 連續達到門檻的次數要求 (單次通過即升級)
-    EVAL_INTERVAL     = 50     # 每經過多少訓練回合進行一次確定性評估
-    EVAL_EPISODES     = 30     # 每次評估執行的測試回合數
 
-    FINAL_THRESHOLD   = 0.80   # 最高層級(Level 7)的通關結訓門檻
-    FINAL_CHECKS      = 1      # 最高層級連續達到門檻的次數要求
+    PROMOTE_THRESHOLD = 0.65   # 一般升級門檻
+    FINAL_THRESHOLD   = 0.80   # Level 7 結訓門檻
+    PROMOTE_CHECKS    = 1      # 連續達標次數（單次即升）
+    FINAL_CHECKS      = 1
+    EVAL_INTERVAL     = 50     # 每幾個回合評估一次
+    EVAL_EPISODES     = 30     # 每次評估的測試回合數
 
-    def __init__(self, save_dir='logs', models_dir='models', model_save_path='best_model', verbose=0):
+    def __init__(self, save_dir='logs', models_dir='models',
+                 model_save_path='best_model', verbose=0):
         super().__init__(verbose)
-        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(save_dir,   exist_ok=True)
         os.makedirs(models_dir, exist_ok=True)
-        
-        self.save_dir = save_dir
-        self.models_dir = models_dir
-        self.csv_path = os.path.join(save_dir, 'rewards.csv')
+
+        self.save_dir        = save_dir
+        self.models_dir      = models_dir
+        self.csv_path        = os.path.join(save_dir, 'rewards.csv')
         self.model_save_path = model_save_path
 
-        self.episode_rewards = []
-        self._new_episodes_start_idx = 0   
-        self._current_ep_reward = 0.0
-        self.recent_components = []
+        self.episode_rewards         = []
+        self._new_episodes_start_idx = 0
+        self._current_ep_reward      = 0.0
+        self.recent_components       = []
 
-        self.current_level = 1
-        self._level_start_idx = 0
-
+        self.current_level            = 1
+        self._level_start_idx         = 0
         self.consecutive_success_checks = 0
-        self.best_det_rate = 0.0
-        self.should_stop_training = False
+        self.best_det_rate            = 0.0
+        self.should_stop_training     = False
 
         self._load_history()
 
     def _load_history(self):
-        # 讀取先前的訓練紀錄，避免訓練中斷重啟後圖表斷層
+        """讀取既有 CSV，接續歷史數據繪圖。"""
         if os.path.exists(self.csv_path):
             try:
                 with open(self.csv_path, 'r', newline='') as f:
@@ -164,10 +162,11 @@ class CurriculumCallback(BaseCallback):
                     for row in reader:
                         if len(row) >= 2:
                             self.episode_rewards.append(float(row[1]))
+                print(f'[History] Loaded {len(self.episode_rewards)} episodes.')
             except Exception as e:
-                print(f'[Error] Load history data failed: {e}')
+                print(f'[Error] Load history failed: {e}')
         self._new_episodes_start_idx = len(self.episode_rewards)
-        self._level_start_idx = len(self.episode_rewards)
+        self._level_start_idx        = len(self.episode_rewards)
 
     def _get_env(self) -> DroneGymEnv:
         return self.locals['env'].envs[0].env
@@ -175,7 +174,6 @@ class CurriculumCallback(BaseCallback):
     def _on_step(self) -> bool:
         self._current_ep_reward += self.locals['rewards'][0]
 
-        # 收集環境回傳的各項獎勵組成細節
         for info in self.locals.get('infos', []):
             if 'ep_components' in info:
                 self.recent_components.append(info['ep_components'])
@@ -184,43 +182,57 @@ class CurriculumCallback(BaseCallback):
         if not dones[0]:
             return not self.should_stop_training
 
-        # 當回合結束時，結算總回報
+        # ── 回合結束 ─────────────────────────────────────────────
         self.episode_rewards.append(self._current_ep_reward)
         self._current_ep_reward = 0.0
         ep = len(self.episode_rewards)
 
-        # 每 10 個回合輸出一次平均獎勵與各項獎勵組成分析
-        if (len(self.recent_components) >= 10 and (ep - self._new_episodes_start_idx) % 10 == 0):
+        # 每 10 回合印一次訓練細項
+        if (len(self.recent_components) >= 10
+                and (ep - self._new_episodes_start_idx) % 10 == 0):
+
             recent_mean = np.mean(self.episode_rewards[-10:])
-            avg_comp = {k: 0.0 for k in self.recent_components[0].keys()}
+            avg_comp    = {k: 0.0 for k in self.recent_components[0].keys()}
             for comp in self.recent_components[-10:]:
                 for k, v in comp.items():
                     avg_comp[k] += v
             for k in avg_comp:
                 avg_comp[k] /= 10.0
 
+            # 印出所有細項（含新增的 align / tilt）
             print(f'[L{self.current_level}] Ep {ep:4d} | Mean: {recent_mean:7.2f} | '
-                  f'Prog: {avg_comp["progress"]:5.2f} | Prox: {avg_comp["proximity"]:5.2f} | '
-                  f'Acti: {avg_comp["action"]:5.2f} | Decel: {avg_comp["decel"]:5.2f} | '
-                  f'Arrive: {avg_comp["arrive"]:5.2f} | Time: {avg_comp["time"]:6.2f} | '
+                  f'Prog: {avg_comp["progress"]:6.2f} | '
+                  f'Align: {avg_comp["align"]:5.2f} | '
+                  f'Prox: {avg_comp["proximity"]:5.2f} | '
+                  f'Decel: {avg_comp["decel"]:5.2f} | '
+                  f'Tilt: {avg_comp["tilt"]:5.2f} | '
+                  f'Acti: {avg_comp["action"]:5.2f} | '
+                  f'Arrive: {avg_comp["arrive"]:6.2f} | '
+                  f'Time: {avg_comp["time"]:6.2f} | '
                   f'Bound: {avg_comp["boundary"]:5.2f}')
+
             self.recent_components = self.recent_components[-10:]
 
-        # 達到評估間隔，執行確定性策略評估
-        if ((ep - self._new_episodes_start_idx) % self.EVAL_INTERVAL == 0 and ep > self._new_episodes_start_idx):
-            det_rate = self._eval_deterministic(self.EVAL_EPISODES)
-            print(f'\n[Det Eval] L{self.current_level} Ep {ep} | Det Success: {det_rate*100:.0f}%', end='')
+        # ── 定期確定性評估 ────────────────────────────────────────
+        if ((ep - self._new_episodes_start_idx) % self.EVAL_INTERVAL == 0
+                and ep > self._new_episodes_start_idx):
 
-            # 更新最佳模型
+            det_rate = self._eval_deterministic(self.EVAL_EPISODES)
+            print(f'\n[Det Eval] L{self.current_level} Ep {ep} | '
+                  f'Success: {det_rate * 100:.0f}%', end='')
+
             if det_rate > self.best_det_rate:
                 self.best_det_rate = det_rate
                 self.model.save(self.model_save_path)
-                print(f' -> [Best saved: {det_rate*100:.0f}%]', end='')
+                print(f' -> [Best saved: {det_rate * 100:.0f}%]', end='')
 
-            threshold = (self.FINAL_THRESHOLD if self.current_level >= DroneGymEnv.MAX_CURRICULUM_LEVEL else self.PROMOTE_THRESHOLD)
-            checks_needed = (self.FINAL_CHECKS if self.current_level >= DroneGymEnv.MAX_CURRICULUM_LEVEL else self.PROMOTE_CHECKS)
+            threshold    = (self.FINAL_THRESHOLD
+                            if self.current_level >= DroneGymEnv.MAX_CURRICULUM_LEVEL
+                            else self.PROMOTE_THRESHOLD)
+            checks_needed = (self.FINAL_CHECKS
+                             if self.current_level >= DroneGymEnv.MAX_CURRICULUM_LEVEL
+                             else self.PROMOTE_CHECKS)
 
-            # 判斷是否滿足單次通過的升級條件
             if det_rate >= threshold:
                 self.consecutive_success_checks += 1
                 print(f' [{self.consecutive_success_checks}/{checks_needed}]')
@@ -229,8 +241,10 @@ class CurriculumCallback(BaseCallback):
                     if self.current_level < DroneGymEnv.MAX_CURRICULUM_LEVEL:
                         self._promote(ep)
                     else:
-                        print(f'\n[Auto-Stop] Level {self.current_level} had reach the promote. Train stop.')
-                        _save_level_snapshot(self.save_dir, self.models_dir, self.current_level, self.episode_rewards, self._level_start_idx, ep, self.model)
+                        print(f'\n[Auto-Stop] Level {self.current_level} completed.')
+                        _save_level_snapshot(
+                            self.save_dir, self.models_dir, self.current_level,
+                            self.episode_rewards, self._level_start_idx, ep, self.model)
                         self.should_stop_training = True
             else:
                 if self.consecutive_success_checks > 0:
@@ -242,33 +256,36 @@ class CurriculumCallback(BaseCallback):
         return not self.should_stop_training
 
     def _promote(self, current_ep: int):
-        # 處理等級提升邏輯，更新環境參數並重置評估計數器
+        """處理等級提升：儲存快照、切換環境難度、重置計數器。"""
         old_level = self.current_level
         new_level = old_level + 1
 
-        print(f'\n{"="*60}')
+        print(f'\n{"=" * 60}')
         print(f'  [Curriculum] LEVEL UP!  {old_level} -> {new_level}')
-        print(f'{"="*60}')
+        print(f'{"=" * 60}')
 
-        _save_level_snapshot(self.save_dir, self.models_dir, old_level, self.episode_rewards, self._level_start_idx, current_ep, self.model)
+        _save_level_snapshot(
+            self.save_dir, self.models_dir, old_level,
+            self.episode_rewards, self._level_start_idx, current_ep, self.model)
 
-        env = self._get_env()
-        env.set_curriculum_level(new_level)
-        self.current_level = new_level
+        self._get_env().set_curriculum_level(new_level)
+        self.current_level              = new_level
         self.consecutive_success_checks = 0
-        self._level_start_idx = current_ep
+        self._level_start_idx           = current_ep
 
     def _eval_deterministic(self, n_episodes: int = 10) -> float:
-        # 關閉隨機探索 (deterministic=True)，測試模型真實控制能力
-        ros = self._get_env().ros
-        env = DroneGymEnv(ros)
+        """
+        關閉隨機探索（deterministic=True），測試模型真實控制能力。
+        成功判定：ep_components['arrive'] > 0（代表完成了 HOVER_STEPS 步懸停）。
+        """
+        env = DroneGymEnv(self._get_env().ros)
         env.set_curriculum_level(self.current_level)
 
         successes = 0
         for _ in range(n_episodes):
-            obs, _ = env.reset()
+            obs, _              = env.reset()
             terminated = truncated = False
-            success = False
+            success             = False
             while not (terminated or truncated):
                 action, _ = self.model.predict(obs, deterministic=True)
                 obs, _, terminated, truncated, info = env.step(action)
@@ -281,144 +298,148 @@ class CurriculumCallback(BaseCallback):
         return successes / n_episodes
 
     def save_curve(self):
-        # 繪製並儲存橫跨所有等級的總體訓練趨勢圖
+        """訓練結束後：寫入 CSV 並繪製全局訓練曲線。"""
         new_rewards = self.episode_rewards[self._new_episodes_start_idx:]
         file_exists = os.path.exists(self.csv_path)
-        mode = 'a' if file_exists else 'w'
-        
+        mode        = 'a' if file_exists else 'w'
+
         with open(self.csv_path, mode, newline='') as f:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow(['episode', 'reward'])
             for i, r in enumerate(new_rewards):
-                ep_num = self._new_episodes_start_idx + i + 1
-                writer.writerow([ep_num, r])
+                writer.writerow([self._new_episodes_start_idx + i + 1, r])
 
         if not self.episode_rewards:
             return
-            
-        rewards = self.episode_rewards
+
+        rewards  = self.episode_rewards
         episodes = list(range(1, len(rewards) + 1))
-        window = 20
-        smoothed = []
-        for i in range(len(rewards)):
-            s = max(0, i - window + 1)
-            smoothed.append(np.mean(rewards[s:i + 1]))
+        window   = 20
+        smoothed = [np.mean(rewards[max(0, i - window + 1):i + 1])
+                    for i in range(len(rewards))]
 
         fig, ax = plt.subplots(figsize=(12, 5))
-        ax.plot(episodes, rewards, color='lightblue', alpha=0.5, label='Episode reward')
-        ax.plot(episodes, smoothed, color='steelblue', linewidth=2, label=f'Moving mean ({window} ep)')
+        ax.plot(episodes, rewards,  color='lightblue', alpha=0.5, label='Episode reward')
+        ax.plot(episodes, smoothed, color='steelblue', linewidth=2,
+                label=f'Moving mean ({window} ep)')
 
-        # 在圖表上標記等級切換點
+        # 標記各 Level 切換點
         for lv in range(1, DroneGymEnv.MAX_CURRICULUM_LEVEL + 1):
             lv_csv = os.path.join(self.save_dir, f'level{lv}', f'rewards_level{lv}.csv')
             if os.path.exists(lv_csv):
                 with open(lv_csv, 'r') as f:
                     rows = list(csv.reader(f))
                 if len(rows) > 1:
-                    last_global_ep = int(rows[-1][1])
+                    last_ep = int(rows[-1][1])
                     if lv < DroneGymEnv.MAX_CURRICULUM_LEVEL:
-                        ax.axvline(x=last_global_ep, color='orange', linestyle='--', alpha=0.7)
+                        ax.axvline(x=last_ep, color='orange',
+                                   linestyle='--', alpha=0.7,
+                                   label=f'L{lv}→L{lv+1}')
 
         ax.set_xlabel('Episode', fontsize=12)
         ax.set_ylabel('Total Reward', fontsize=12)
-        ax.set_title('PPO Training Curve - Curriculum Learning (Level 1 to 7)', fontsize=13)
-        ax.legend()
+        ax.set_title('PPO Training Curve - Curriculum Learning (L1~L7)', fontsize=13)
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        png_path = os.path.join(self.save_dir, 'training_curve.png')
         plt.tight_layout()
-        plt.savefig(png_path, dpi=150)
+        plt.savefig(os.path.join(self.save_dir, 'training_curve.png'), dpi=150)
         plt.close()
+        print(f'[Curve] Saved to {self.save_dir}/training_curve.png')
 
 
+# ================================================================
+# 主訓練流程
+# ================================================================
 def main():
     os.makedirs('logs', exist_ok=True)
-    log_file_path = os.path.join('logs', 'training_console.log')
-    
-    # 綁定標準輸出與標準錯誤到自定義的 Logger
-    sys.stdout = DualLogger(log_file_path)
-    sys.stderr = sys.stdout  # 讓潛在的報錯訊息也寫入同一個檔案
+    sys.stdout = DualLogger(os.path.join('logs', 'training_console.log'))
+    sys.stderr = sys.stdout
 
-    parser = argparse.ArgumentParser(description="訓練無人機 PPO 模型 (支援課程學習)")
-    parser.add_argument('--level', type=int, default=1, help='指定起始的課程等級 (1~7)')
-    args = parser.parse_args()
-    start_level = args.level
+    parser = argparse.ArgumentParser(description='Train drone PPO with curriculum learning')
+    parser.add_argument('--level', type=int, default=1,
+                        help='Starting curriculum level (1~7)')
+    args        = parser.parse_args()
+    start_level = int(np.clip(args.level, 1, DroneGymEnv.MAX_CURRICULUM_LEVEL))
 
     print('=' * 60)
-    print(f'  PPO train start (From level: {start_level})')
+    print(f'  PPO Training Start (From Level: {start_level})')
+    print(f'  Observation: 13-dim | Curriculum: L1~L7')
     print('=' * 60)
 
     rclpy.init()
     ros_interface = DroneROSInterface()
-    env = DroneGymEnv(ros_interface)
+    env           = DroneGymEnv(ros_interface)
 
+    print('Waiting for Gazebo pose data...')
     while not ros_interface.pose_received:
         rclpy.spin_once(ros_interface, timeout_sec=0.5)
+    print('Pose received. Starting training.\n')
 
     models_dir = 'models'
     os.makedirs(models_dir, exist_ok=True)
-    
-    # 決定載入權重的邏輯，優先尋找當前設定等級之模型，次之尋找前一等級
-    model_resume_path = os.path.join(models_dir, f'model_level{start_level}')
-    model_prev_path   = os.path.join(models_dir, f'model_level{start_level - 1}')
 
-    if os.path.exists(model_resume_path + '.zip'):
-        model = PPO.load(model_resume_path, env=env)
-    elif start_level > 1 and os.path.exists(model_prev_path + '.zip'):
-        model = PPO.load(model_prev_path, env=env)
+    # 決定載入哪個模型（當前 Level → 前一 Level → 全新）
+    model_resume = os.path.join(models_dir, f'model_level{start_level}')
+    model_prev   = os.path.join(models_dir, f'model_level{start_level - 1}')
+
+    if os.path.exists(model_resume + '.zip'):
+        print(f'[Resume] Loading {model_resume}.zip')
+        model = PPO.load(model_resume, env=env)
+    elif start_level > 1 and os.path.exists(model_prev + '.zip'):
+        print(f'[Resume] Loading previous level: {model_prev}.zip')
+        model = PPO.load(model_prev, env=env)
     else:
-        # PPO 模型超參數設定
-        # 參數值設計參照文獻設定以確保高穩定性與高樣本效率
+        print('[New] Creating new PPO model...')
         model = PPO(
-            policy          = 'MlpPolicy',
-            env             = env,
-            verbose         = 1,
-
-            # [參考: Shen 等人 (2024) 論文] PPO 訓練參數表 (Table 1)
-            # 這些超參數與 Shen 論文中 PPO 最佳化參數完全一致：
-            learning_rate   = 3e-4,  # 對應 Shen 論文的 0.0003 (AirPilot 也使用 3e-4)
-            n_steps         = 2048,  # 對應 Shen 論文的 N steps = 2048
-            batch_size      = 64,    # 對應 Shen 論文的 Batch Size = 64 (AirPilot 也使用 64)
-            gamma           = 0.99,  # 對應 Shen 論文的 Gamma = 0.99 (AirPilot 也是 0.99)
-            gae_lambda      = 0.95,  # 對應 Shen 論文的 GAE Lambda = 0.95
-            vf_coef         = 0.5,   # 對應 Shen 論文的 VF Coefficient = 0.5
-            
-            n_epochs        = 10,
-            ent_coef        = 0.01,
-
-            # [參考: Tan & Karaköse (2023) 論文] 分散式 PPO 無人機追蹤
-            # 架構設計參考了其處理三維狀態的設定 (Table 2)。
-            policy_kwargs   = dict(
-                net_arch      = [256, 256],    # 對應 Tan 論文的 Hidden layer = 256
-                activation_fn = torch.nn.Tanh, # 對應 Tan 論文的 Activation function = tanh
+            policy        = 'MlpPolicy',
+            env           = env,
+            verbose       = 1,
+            # [Shen 2024] Table 1 最佳參數
+            learning_rate = 3e-4,
+            n_steps       = 2048,
+            batch_size    = 64,
+            gamma         = 0.99,
+            gae_lambda    = 0.95,
+            vf_coef       = 0.5,
+            n_epochs      = 10,
+            ent_coef      = 0.01,
+            # [Tan 2023] Table 2 網路架構
+            policy_kwargs = dict(
+                net_arch      = [256, 256],
+                activation_fn = torch.nn.Tanh,
             ),
             tensorboard_log = './logs/tensorboard/',
         )
 
-    callback = CurriculumCallback(save_dir='logs', models_dir=models_dir, model_save_path='best_model')
+    callback = CurriculumCallback(
+        save_dir        = 'logs',
+        models_dir      = models_dir,
+        model_save_path = 'best_model',
+    )
     callback.current_level = start_level
     env.set_curriculum_level(start_level)
 
-    TOTAL_TIMESTEPS = 2_000_000
     try:
         model.learn(
-            total_timesteps     = TOTAL_TIMESTEPS,
+            total_timesteps     = 2_000_000,
             callback            = callback,
             progress_bar        = False,
             reset_num_timesteps = False,
         )
     except KeyboardInterrupt:
-        pass
-    
-    # 手動中斷或訓練結束時，儲存為中斷備份檔，避免覆蓋標準升級檔
-    NEW_MODEL_NAME = 'ppo_drone_curriculum_resume'
-    model.save(NEW_MODEL_NAME)
+        print('\n[Interrupted] Saving checkpoint...')
+
+    model.save('ppo_drone_curriculum_resume')
+    print('Checkpoint saved: ppo_drone_curriculum_resume.zip')
 
     callback.save_curve()
 
     ros_interface.send_velocity(0, 0, 0)
     ros_interface.destroy_node()
     rclpy.shutdown()
+    print('\nTraining complete.')
+
 
 if __name__ == '__main__':
     main()
