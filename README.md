@@ -10,7 +10,7 @@
 
 - [環境需求](#環境需求)
 - [Repository 結構](#repository-結構)
-- [快速啟動（Docker + VNC）](#快速啟動docker--vnc)
+- [啟動（Docker + VNC）](#啟動docker--vnc)
 - [WSL 使用方式](#wsl-使用方式)
 - [安裝 Python 套件](#安裝-python-套件)
 - [訓練 RL 模型（train.py）](#訓練-rl-模型trainpy)
