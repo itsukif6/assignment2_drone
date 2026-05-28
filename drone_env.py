@@ -361,9 +361,9 @@ class DroneGymEnv(gym.Env):
         action       = np.clip(action, -self.MAX_SPEED, self.MAX_SPEED)
         real_velocity = action * 0.8
 
-        # 時間同步阻塞：確保每步物理時間為 0.1s（不可修改）
-        start_ns = self.ros.get_clock().now().nanoseconds
-        while (self.ros.get_clock().now().nanoseconds - start_ns) < 1e8:
+        # 時間同步阻塞：確保每步物理時間為 0.1s
+        start_time_nanosecond = self.ros.get_clock().now().nanoseconds
+        while (self.ros.get_clock().now().nanoseconds - start_time_nanosecond) < 1e8:
             self.ros.send_velocity(*real_velocity)
             rclpy.spin_once(self.ros, timeout_sec=0.01)
         self.step_count += 1
